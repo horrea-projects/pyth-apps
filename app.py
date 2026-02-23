@@ -18,7 +18,7 @@ from config import get_settings
 from zendesk_client import ZendeskClient
 from gsheet_client import GoogleSheetsClient
 from export_client import ExportClient
-from templates import nav_html, home_page_html, horrea_base_html, breadcrumb_fragment, status_page_html
+from templates import nav_html, home_page_html, pythapps_base_html, breadcrumb_fragment, status_page_html
 
 # OAuth et modules optionnels
 try:
@@ -76,16 +76,32 @@ def get_zendesk_client() -> ZendeskClient:
     return zendesk_client
 
 
+def _resolve_credentials_path() -> str:
+    """Chemin vers le JSON Service Account (variable d'env ou fichiers par défaut)."""
+    path = settings.GOOGLE_SHEETS_CREDENTIALS_PATH
+    if path and Path(path).exists():
+        return path
+    # Fichiers par défaut à la racine du projet
+    root = Path(__file__).resolve().parent
+    for name in ("Pyth Apps IAM People.json", "credentials.json"):
+        candidate = root / name
+        if candidate.exists():
+            return str(candidate)
+    raise ValueError(
+        "GOOGLE_SHEETS_CREDENTIALS_PATH non défini ou fichier introuvable. "
+        "Définissez la variable dans .env ou placez le JSON (ex: Pyth Apps IAM People.json) à la racine."
+    )
+
+
 def get_gsheet_client() -> GoogleSheetsClient:
     """Récupère ou crée le client Google Sheets."""
     global gsheet_client
     if gsheet_client is None:
         if not settings.GOOGLE_SHEET_ID:
             raise ValueError("GOOGLE_SHEET_ID requis pour le mode Google Sheets")
-        if not settings.GOOGLE_SHEETS_CREDENTIALS_PATH:
-            raise ValueError("GOOGLE_SHEETS_CREDENTIALS_PATH requis pour le mode Google Sheets")
+        credentials_path = _resolve_credentials_path()
         gsheet_client = GoogleSheetsClient(
-            credentials_path=settings.GOOGLE_SHEETS_CREDENTIALS_PATH,
+            credentials_path=credentials_path,
             sheet_id=settings.GOOGLE_SHEET_ID,
             sheet_name=settings.GOOGLE_SHEET_NAME
         )

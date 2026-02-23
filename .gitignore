@@ -2,8 +2,15 @@
 .env
 .env.local
 
-# Google Service Account credentials
+# Google Service Account credentials (ne jamais commiter – contient la clé privée)
 credentials.json
+*IAM*.json
+*credentials*.json
+Pyth Apps IAM People.json
+# OAuth Client Secret (ne jamais commiter – contient client_secret)
+*Client*Secret*OAuth*.json
+*client*secret*.json
+
 # Données OAuth (tokens) – ne pas commiter
 data/
 
