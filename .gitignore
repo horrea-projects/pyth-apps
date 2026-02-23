@@ -1,0 +1,37 @@
+# Environment variables
+.env
+.env.local
+
+# Google Service Account credentials
+credentials.json
+# Données OAuth (tokens) – ne pas commiter
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# Exports générés (CSV/Excel)
+exports/
+

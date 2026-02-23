@@ -1,0 +1,22 @@
+fastapi>=0.115.0
+uvicorn[standard]>=0.32.0
+python-multipart>=0.0.9
+requests>=2.32.0
+python-dotenv>=1.0.1
+pydantic>=2.10.0
+pydantic-settings>=2.6.0
+
+# Google Sheets (optionnel, seulement si EXPORT_MODE=gsheet)
+gspread>=6.1.0
+google-auth>=2.35.0
+google-auth-oauthlib>=1.2.0
+google-auth-httplib2>=0.2.0
+# API Google Sheets (pour la webapp Sync - OAuth utilisateur)
+google-api-python-client>=2.100.0
+
+# Excel export (optionnel, seulement si EXPORT_MODE=xlsx)
+openpyxl>=3.1.0
+
+# WSGI pour PythonAnywhere (optionnel, seulement pour hébergement Web)
+a2wsgi>=0.14.0
+
