@@ -19,6 +19,7 @@ from config import get_settings
 from zendesk_client import ZendeskClient
 from gsheet_client import GoogleSheetsClient
 from export_client import ExportClient
+from constants import MODULES
 from templates import nav_html, home_page_html, pythapps_base_html, breadcrumb_fragment, status_page_html
 
 # OAuth et modules optionnels
@@ -141,23 +142,7 @@ class StatusResponse(BaseModel):
     export_info: str = ""
 
 
-# ---------- Page d'accueil (choix du module) ----------
-
-MODULES = [
-    {
-        "url": "/zendesk",
-        "title": "Zendesk – Export & Sync",
-        "description": "Exporter les tickets Zendesk en CSV/Excel et synchroniser vers une Google Sheet.",
-        "status_key": "zendesk",
-    },
-    {
-        "url": "/sheets-calc",
-        "title": "Calculs entre deux Google Sheets",
-        "description": "Comparer deux feuilles, différences ou lignes communes selon une clé.",
-        "status_key": "sheets_calc",
-    },
-]
-
+# ---------- Page d'accueil (choix du module : MODULES dans constants.py) ----------
 
 # Cache du statut pour éviter d'appeler Zendesk à chaque requête (évite timeout HARAKIRI sur PythonAnywhere)
 _status_cache: tuple = (0, None)

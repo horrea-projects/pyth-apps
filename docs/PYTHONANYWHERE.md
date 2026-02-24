@@ -181,4 +181,6 @@ Si vous voyez **502** (« Something went wrong ») et dans **Server log** des li
 - La page d’accueil ne fait pas d’appel Zendesk/Google (statut détaillé sur `/status/page`).
 - Le statut est mis en cache 60 s pour éviter les timeouts sur la page Statut.
 
+**En plus** : pour que la page d’accueil réponde même si le chargement de l’app est lent, **GET /** et **GET /favicon.ico** sont servis **directement dans `wsgi.py`** sans charger FastAPI (ni config, ni Zendesk, ni OAuth). Seuls `constants` et `templates` sont utilisés. Le reste de l’app (FastAPI) n’est chargé qu’au premier accès à une autre URL (ex. `/zendesk`). Ainsi, la racine et le favicon ne devraient plus déclencher de HARAKIRI.
+
 Si la 502 apparaît encore sur une autre URL, vérifiez les logs et les credentials (OAuth, Zendesk).
