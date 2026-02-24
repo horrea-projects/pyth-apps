@@ -11,7 +11,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from pathlib import Path
 
@@ -33,7 +33,7 @@ try:
         is_google_connected,
         disconnect_google,
     )
-    from sync_export_to_sheet import sync_csv_to_sheet
+    from sync_export_to_sheet import sync_csv_to_sheet, verify_sheet_access
     from sheets_calc_service import read_sheet, OPERATIONS as SHEETS_CALC_OPERATIONS
     SYNC_APP_AVAILABLE = True
     SHEETS_CALC_AVAILABLE = True
@@ -223,9 +223,16 @@ def _zendesk_page_html(extra: str = "") -> str:
 
 
 @app.get("/zendesk", response_class=HTMLResponse)
-def zendesk_dashboard():
+def zendesk_dashboard(request: Request):
     """Dashboard du module Zendesk : export + lien vers sync."""
+    started = request.query_params.get("started")
+    alert = ""
+    if started == "full":
+        alert = '<div class="alert alert-success" style="margin-bottom:16px;">Import complet démarré en arrière-plan. Consultez les logs pour la progression.</div>'
+    elif started == "incremental":
+        alert = '<div class="alert alert-success" style="margin-bottom:16px;">Import incrémental démarré en arrière-plan. Consultez les logs pour la progression.</div>'
     extra = f"""
+    {alert}
     <div class="info"><strong>Mode d'export :</strong> {settings.EXPORT_MODE.upper()}</div>
     <p><strong>Export Zendesk</strong></p>
     <form method="POST" action="/import/full" style="display:inline;" onsubmit="return confirm('Import complet ?');">
@@ -384,19 +391,55 @@ def sync_app_settings_page():
     html = _sync_app_base_html("Zendesk / Sync / Paramètres")
     html += """<div class="card">
         <h1>Paramètres – Sync Google Sheet</h1>
-        <form method="post" action="/zendesk/sync/settings">
+        <form id="sync-settings-form" method="post" action="/zendesk/sync/settings">
             <label>ID de la feuille Google</label>
-            <input type="text" name="sheet_id" value=\"""" + (sheet_id or "") + """\" placeholder="1-0uyOH7xwU8OfFkm2gJKUZt-6pfx_ScTnfDmyW_BuuY">
+            <input type="text" name="sheet_id" id="sheet_id" value=\"""" + (sheet_id or "") + """\" placeholder="1-0uyOH7xwU8OfFkm2gJKUZt-6pfx_ScTnfDmyW_BuuY">
             <p class="small">Trouvable dans l’URL : docs.google.com/spreadsheets/d/<strong>ID_ICI</strong>/edit</p>
             <label>Nom de l’onglet</label>
-            <input type="text" name="sheet_name" value=\"""" + (sheet_name or "Tickets") + """\" placeholder="Tickets">
+            <input type="text" name="sheet_name" id="sheet_name" value=\"""" + (sheet_name or "Tickets") + """\" placeholder="Tickets">
+            <p id="verify-result" class="small" style="margin-top:8px;min-height:1.2em;"></p>
+            <p style="margin-top:12px;"><button type="button" id="btn-verify" class="btn btn-secondary">Vérifier la feuille et l'onglet</button></p>
             <label style="margin-top:12px;"><input type="checkbox" name="auto_update" """ + ("checked" if auto_update else "") + """> Mise à jour automatique (planifiée)</label>
             <p class="small">Si activé, configurez une tâche cron pour appeler POST /sync-now régulièrement.</p>
             <p style="margin-top:16px;"><button type="submit" class="btn btn-primary">Enregistrer</button></p>
         </form>
         <p><a href="/zendesk/sync" class="btn btn-secondary">Retour au dashboard</a></p>
-    </div></body></html>"""
+    </div>
+    <script>
+    document.getElementById('btn-verify').onclick = function() {
+        var out = document.getElementById('verify-result');
+        out.textContent = 'Vérification…';
+        out.style.color = '';
+        var fd = new FormData();
+        fd.append('sheet_id', document.getElementById('sheet_id').value);
+        fd.append('sheet_name', document.getElementById('sheet_name').value);
+        fetch('/zendesk/sync/verify', { method: 'POST', body: fd })
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                if (d.ok) { out.textContent = '✓ ' + (d.message || 'Feuille et onglet trouvés.'); out.style.color = 'green'; }
+                else { out.textContent = '✗ ' + (d.error || 'Erreur'); out.style.color = '#c00'; }
+            })
+            .catch(function(e) { out.textContent = '✗ Erreur: ' + e.message; out.style.color = '#c00'; });
+    };
+    </script></body></html>"""
     return HTMLResponse(html)
+
+
+@app.post("/zendesk/sync/verify")
+def sync_verify_sheet(
+    sheet_id: str = Form(""),
+    sheet_name: str = Form("Tickets"),
+):
+    """Vérifie que la feuille et l'onglet existent et sont accessibles (retourne JSON)."""
+    if not SYNC_APP_AVAILABLE:
+        raise HTTPException(status_code=503, detail="Module non disponible")
+    if not is_google_connected(settings):
+        return JSONResponse({"ok": False, "error": "Compte Google non connecté."})
+    creds = get_valid_credentials(settings)
+    if not creds:
+        return JSONResponse({"ok": False, "error": "Credentials invalides ou expirés."})
+    result = verify_sheet_access(creds, sheet_id, sheet_name)
+    return JSONResponse(result)
 
 
 @app.post("/zendesk/sync/settings")
@@ -690,52 +733,44 @@ def process_full_import():
         raise
 
 
+def _import_full_start(background_tasks: BackgroundTasks) -> str:
+    """Vérifie les connexions, lance l'import en arrière-plan. Retourne le message de confirmation."""
+    zendesk = get_zendesk_client()
+    if not zendesk.test_connection():
+        raise HTTPException(status_code=503, detail="Connexion Zendesk échouée")
+    if settings.EXPORT_MODE == "gsheet":
+        gsheet = get_gsheet_client()
+        if not gsheet.test_connection():
+            raise HTTPException(status_code=503, detail="Connexion Google Sheets échouée")
+    else:
+        try:
+            get_export_client()
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Erreur export {settings.EXPORT_MODE}: {e}")
+    background_tasks.add_task(process_full_import)
+    mode_info = f"vers {settings.EXPORT_MODE.upper()}"
+    if settings.EXPORT_MODE in ["csv", "xlsx"]:
+        mode_info += f" (répertoire '{settings.EXPORT_OUTPUT_DIR}')"
+    return f"Import complet démarré en arrière-plan {mode_info}. Consultez les logs pour la progression."
+
+
 @app.post("/import/full", response_model=ImportResponse)
-async def import_full(background_tasks: BackgroundTasks):
+async def import_full(request: Request, background_tasks: BackgroundTasks):
     """
-    Déclenche un import complet de tous les tickets Zendesk.
-    
-    Cette opération peut prendre du temps et est exécutée en arrière-plan.
-    
-    Returns:
-        ImportResponse: Confirmation du démarrage de l'import
+    Déclenche un import complet. Redirige vers /zendesk si soumission formulaire, sinon JSON.
     """
     try:
-        # Vérifier les connexions avant de démarrer
-        zendesk = get_zendesk_client()
-        
-        if not zendesk.test_connection():
-            raise HTTPException(status_code=503, detail="Connexion Zendesk échouée")
-        
-        # Vérifier le système d'export
-        if settings.EXPORT_MODE == "gsheet":
-            gsheet = get_gsheet_client()
-            if not gsheet.test_connection():
-                raise HTTPException(status_code=503, detail="Connexion Google Sheets échouée")
-        else:
-            # Pour CSV/Excel, vérifier que le répertoire est accessible
-            try:
-                get_export_client()
-            except Exception as e:
-                raise HTTPException(status_code=503, detail=f"Erreur export {settings.EXPORT_MODE}: {e}")
-        
-        # Démarrer l'import en arrière-plan
-        background_tasks.add_task(process_full_import)
-        
-        mode_info = f"vers {settings.EXPORT_MODE.upper()}"
-        if settings.EXPORT_MODE in ["csv", "xlsx"]:
-            mode_info += f" (dans le répertoire '{settings.EXPORT_OUTPUT_DIR}')"
-        
-        return ImportResponse(
-            success=True,
-            message=f"Import complet démarré en arrière-plan {mode_info}. Consultez les logs pour suivre la progression."
-        )
-        
+        message = _import_full_start(background_tasks)
     except HTTPException:
         raise
     except Exception as e:
         logger.error(f"Erreur lors du démarrage de l'import complet: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+    accept = (request.headers.get("Accept") or "").lower()
+    if "application/json" in accept:
+        return ImportResponse(success=True, message=message)
+    return RedirectResponse("/zendesk?started=full", status_code=302)
 
 
 @app.post("/import/incremental", response_model=ImportResponse)
