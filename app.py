@@ -7,10 +7,11 @@ Application FastAPI principale – plateforme de webapps (modules).
 """
 
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Form
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from pydantic import BaseModel
 from pathlib import Path
 
@@ -158,8 +159,17 @@ MODULES = [
 ]
 
 
+# Cache du statut pour éviter d'appeler Zendesk à chaque requête (évite timeout HARAKIRI sur PythonAnywhere)
+_status_cache: tuple = (0, None)
+_STATUS_CACHE_TTL = 60  # secondes
+
+
 def _get_status_data() -> dict:
-    """Retourne un dict de statut pour la page d'accueil et la page Statut (zendesk, google_oauth, overall)."""
+    """Retourne un dict de statut (zendesk, google_oauth, overall). Mis en cache 60s pour éviter les timeouts."""
+    global _status_cache
+    now = time.time()
+    if _status_cache[1] is not None and (now - _status_cache[0]) < _STATUS_CACHE_TTL:
+        return _status_cache[1]
     google_connected = False
     if SYNC_APP_AVAILABLE:
         try:
@@ -190,7 +200,7 @@ def _get_status_data() -> dict:
         except Exception as e:
             export_info = str(e)[:80]
     overall = "healthy" if (zendesk_ok and export_ready) else "degraded"
-    return {
+    data = {
         "overall": overall,
         "zendesk": {
             "connected": zendesk_ok,
@@ -199,16 +209,20 @@ def _get_status_data() -> dict:
         },
         "google_oauth": {"connected": google_connected},
     }
+    _status_cache = (now, data)
+    return data
 
 
 @app.get("/", response_class=HTMLResponse)
 async def root():
-    """Page d'accueil : liste des modules avec statut dans les cartes."""
-    try:
-        status_data = _get_status_data()
-    except Exception:
-        status_data = None
-    return HTMLResponse(home_page_html(MODULES, status_data))
+    """Page d'accueil : liste des modules. Pas d'appel statut ici pour éviter timeout HARAKIRI (voir /status/page)."""
+    return HTMLResponse(home_page_html(MODULES, None))
+
+
+@app.get("/favicon.ico", include_in_schema=False)
+async def favicon():
+    """Réponse immédiate pour éviter que le navigateur ne déclenche un timeout HARAKIRI."""
+    return Response(status_code=204)
 
 
 # ---------- Module Zendesk ----------

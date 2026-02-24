@@ -96,21 +96,29 @@ Optionnel (mode gsheet avec Service Account) :
 
 ```python
 import sys
-path = '/home/leocarre/pyth-apps'
+import os
+
+# Chemin du projet (adapter le nom d'utilisateur si besoin)
+path = '/home/LeoCarre/pyth-apps'
 if path not in sys.path:
     sys.path.insert(0, path)
+
+# Important : définir le répertoire de travail pour data/, exports/, etc.
+os.chdir(path)
 
 from wsgi import application
 ```
 
 3. Enregistrez.
 
+**En cas d’erreur** : vérifiez que le dossier existe bien (onglet **Files** : vous devez voir `pyth-apps` avec `app.py`, `wsgi.py`, etc.). Vérifiez aussi que **Virtualenv** pointe vers `/home/LeoCarre/pyth-apps/venv`. Consultez l’onglet **Log** (Error log) pour voir le message d’erreur exact.
+
 ### 5.3 Virtualenv
 
 Dans **Web** → **Virtualenv**, indiquez :
 
 ```
-/home/leocarre/pyth-apps/venv
+/home/LeoCarre/pyth-apps/venv
 ```
 
 (Remplacez `leocarre` par votre nom d’utilisateur PythonAnywhere.)
@@ -149,3 +157,26 @@ pip install -r requirements.txt   # si requirements ont changé
 ```
 
 Puis **Web** → **Reload**.
+
+---
+
+## Dépannage WSGI
+
+- **Erreur au chargement** : ouvrez **Web** → **Error log** et regardez la dernière ligne (ImportError, ModuleNotFoundError, etc.).
+- **Chemin** : le dossier doit s’appeler exactement `pyth-apps` si vous avez fait `git clone ... pyth-apps.git`. Sinon adaptez `path = '/home/LeoCarre/NOM_DU_DOSSIER'` dans le fichier WSGI.
+- **Virtualenv** : **Web** → **Virtualenv** doit être renseigné : `/home/LeoCarre/pyth-apps/venv` (bouton vert pour créer/choisir le venv si besoin).
+- **`a2wsgi` manquant** : dans une console Bash, `cd ~/pyth-apps && source venv/bin/activate && pip install a2wsgi` puis Reload.
+
+### Erreur 502 et HARAKIRI (server.log)
+
+Si vous voyez **502** (« Something went wrong ») et dans **Server log** des lignes du type :
+
+- `HARAKIRI ON WORKER 1` puis `worker 1 died, killed by signal 9`
+
+c’est uWSGI qui tue le worker parce qu’une requête a dépassé le délai autorisé (souvent 30 s sur PythonAnywhere). L’app a été modifiée pour limiter ce risque :
+
+- La **page d’accueil** (`/`) ne fait plus d’appel à Zendesk/Google : elle répond tout de suite (le statut détaillé est sur `/status/page`).
+- **`/favicon.ico`** a une route dédiée qui renvoie immédiatement un 204.
+- Le **statut** (Zendesk, export, OAuth) est mis en cache 60 s pour la page Statut, afin d’éviter de bloquer sur des appels lents.
+
+Si la 502 persiste sur une autre URL (ex. `/auth/google/callback`), vérifiez que les credentials Google et la Redirect URI sont corrects ; l’échange de code OAuth a un timeout de 10 s côté app.
