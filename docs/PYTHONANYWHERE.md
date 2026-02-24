@@ -173,10 +173,12 @@ Si vous voyez **502** (« Something went wrong ») et dans **Server log** des li
 
 - `HARAKIRI ON WORKER 1` puis `worker 1 died, killed by signal 9`
 
-c’est uWSGI qui tue le worker parce qu’une requête a dépassé le délai autorisé (souvent 30 s sur PythonAnywhere). L’app a été modifiée pour limiter ce risque :
+**Cause** : sous **a2wsgi + uWSGI** (single process), l’event loop asyncio n’est pas correctement piloté. Les routes déclarées en `async def` peuvent ne jamais terminer et rester en attente jusqu’à ce qu’uWSGI tue le worker (timeout ~30 s = HARAKIRI).
 
-- La **page d’accueil** (`/`) ne fait plus d’appel à Zendesk/Google : elle répond tout de suite (le statut détaillé est sur `/status/page`).
-- **`/favicon.ico`** a une route dédiée qui renvoie immédiatement un 204.
-- Le **statut** (Zendesk, export, OAuth) est mis en cache 60 s pour la page Statut, afin d’éviter de bloquer sur des appels lents.
+**Modifications dans l’app** :
 
-Si la 502 persiste sur une autre URL (ex. `/auth/google/callback`), vérifiez que les credentials Google et la Redirect URI sont corrects ; l’échange de code OAuth a un timeout de 10 s côté app.
+- Les routes qui n’ont pas besoin d’`await` sont en **`def` (sync)** : `/`, `/favicon.ico`, `/zendesk`, `/zendesk/sync`, `/auth/google`, `/auth/google/callback`, `/auth/disconnect`, `/zendesk/sync/settings`, `/sync-now`, `/status/page`, `/status`, `/health`. Elles répondent correctement sous WSGI.
+- La page d’accueil ne fait pas d’appel Zendesk/Google (statut détaillé sur `/status/page`).
+- Le statut est mis en cache 60 s pour éviter les timeouts sur la page Statut.
+
+Si la 502 apparaît encore sur une autre URL, vérifiez les logs et les credentials (OAuth, Zendesk).

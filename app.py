@@ -214,14 +214,14 @@ def _get_status_data() -> dict:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def root():
-    """Page d'accueil : liste des modules. Pas d'appel statut ici pour éviter timeout HARAKIRI (voir /status/page)."""
+def root():
+    """Page d'accueil : liste des modules. Sync pour éviter blocage a2wsgi+uWSGI (pas d'event loop)."""
     return HTMLResponse(home_page_html(MODULES, None))
 
 
 @app.get("/favicon.ico", include_in_schema=False)
-async def favicon():
-    """Réponse immédiate pour éviter que le navigateur ne déclenche un timeout HARAKIRI."""
+def favicon():
+    """Réponse immédiate pour éviter timeout HARAKIRI."""
     return Response(status_code=204)
 
 
@@ -238,7 +238,7 @@ def _zendesk_page_html(extra: str = "") -> str:
 
 
 @app.get("/zendesk", response_class=HTMLResponse)
-async def zendesk_dashboard():
+def zendesk_dashboard():
     """Dashboard du module Zendesk : export + lien vers sync."""
     extra = f"""
     <div class="info"><strong>Mode d'export :</strong> {settings.EXPORT_MODE.upper()}</div>
@@ -273,7 +273,7 @@ def _sync_app_base_html(breadcrumb: str = ""):
 
 
 @app.get("/zendesk/sync", response_class=HTMLResponse)
-async def sync_app_dashboard(request: Request):
+def sync_app_dashboard(request: Request):
     """Tableau de bord de la webapp Sync vers Google Sheet."""
     if not SYNC_APP_AVAILABLE:
         return HTMLResponse(
@@ -354,7 +354,7 @@ async def sync_app_dashboard(request: Request):
 
 
 @app.get("/auth/google")
-async def auth_google_start(request: Request, next: str = "/"):
+def auth_google_start(request: Request, next: str = "/"):
     """Redirige vers Google OAuth. next = URL de retour après connexion."""
     if not settings.GOOGLE_OAUTH_CLIENT_ID:
         raise HTTPException(status_code=503, detail="OAuth non configuré")
@@ -364,7 +364,7 @@ async def auth_google_start(request: Request, next: str = "/"):
 
 
 @app.get("/auth/google/callback")
-async def auth_google_callback(request: Request, code: str = None, state: str = None):
+def auth_google_callback(request: Request, code: str = None, state: str = None):
     """Callback OAuth : échange le code contre les tokens, redirige vers state."""
     if not code:
         return RedirectResponse((state or "/") + "?error=no_code")
@@ -378,7 +378,7 @@ async def auth_google_callback(request: Request, code: str = None, state: str = 
 
 
 @app.post("/auth/disconnect")
-async def auth_disconnect(request: Request):
+def auth_disconnect(request: Request):
     """Déconnexion du compte Google."""
     if SYNC_APP_AVAILABLE:
         disconnect_google(settings)
@@ -387,7 +387,7 @@ async def auth_disconnect(request: Request):
 
 
 @app.get("/zendesk/sync/settings", response_class=HTMLResponse)
-async def sync_app_settings_page():
+def sync_app_settings_page():
     """Paramètres Sync : feuille cible et mise à jour auto."""
     if not SYNC_APP_AVAILABLE:
         raise HTTPException(status_code=503, detail="Module non disponible")
@@ -415,7 +415,7 @@ async def sync_app_settings_page():
 
 
 @app.post("/zendesk/sync/settings")
-async def sync_app_settings_save(
+def sync_app_settings_save(
     request: Request,
     sheet_id: str = Form(""),
     sheet_name: str = Form("Tickets"),
@@ -433,7 +433,7 @@ async def sync_app_settings_save(
 
 
 @app.post("/sync-now")
-async def sync_now():
+def sync_now():
     """Lance la synchronisation : dernier export CSV → Google Sheet."""
     if not SYNC_APP_AVAILABLE:
         raise HTTPException(status_code=503, detail="Module sync non disponible")
@@ -578,7 +578,7 @@ async def sheets_calc_run(
 
 
 @app.get("/status/page", response_class=HTMLResponse)
-async def status_page():
+def status_page():
     """Page Statut (UI) : état des services avec le design Pyth-apps."""
     try:
         data = _get_status_data()
@@ -593,7 +593,7 @@ async def status_page():
 
 
 @app.get("/status", response_model=StatusResponse)
-async def get_status():
+def get_status():
     """API : statut des connexions Zendesk et export (JSON)."""
     try:
         data = _get_status_data()
@@ -809,7 +809,7 @@ async def import_incremental(hours: int = 24):
 
 
 @app.get("/health")
-async def health_check():
+def health_check():
     """Endpoint de santé simple pour les vérifications de base."""
     return {"status": "ok"}
 
