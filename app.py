@@ -557,6 +557,12 @@ def _sync_frequency_hours(sync_frequency: str) -> int:
     return {"24h": 24, "48h": 48, "weekly": 24 * 7, "monthly": 24 * 30}.get(sync_frequency, 24)
 
 
+@app.get("/zendesk/sync/run-incremental")
+def sync_run_incremental_get():
+    """Si accès en GET (lien, favori), redirection avec message."""
+    return RedirectResponse("/zendesk/sync?error=" + quote("Utilisez le bouton « Enrichir maintenant » sur cette page."), status_code=302)
+
+
 @app.post("/zendesk/sync/run-incremental")
 def sync_run_incremental(request: Request):
     """

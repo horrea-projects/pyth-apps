@@ -86,44 +86,46 @@ class ZendeskClient:
         """
         url = None
         page_count = 0
-        
+        users_by_id = {}
+        groups_by_id = {}
+
         while True:
-            # Construire l'URL de la requête
             if url is None:
-                # Première requête
                 endpoint = "/tickets.json"
                 params = {
-                    "per_page": min(page_size, 100),  # Limite API Zendesk
+                    "per_page": min(page_size, 100),
                     "sort_by": "created_at",
-                    "sort_order": "desc"  # Plus récents en premier
+                    "sort_order": "desc",
+                    "include": "users,groups"
                 }
                 if include_fields:
-                    params["include"] = ",".join(include_fields)
+                    params["include"] = "users,groups," + ",".join(include_fields)
                 full_url = None
             else:
-                # Requêtes suivantes : utiliser l'URL complète du lien "next"
-                # next_page contient déjà l'URL complète avec tous les paramètres
                 endpoint = None
                 params = None
                 full_url = url
-            
+
             try:
                 if full_url:
                     data = self._make_request("", params=None, full_url=full_url)
                 else:
                     data = self._make_request(endpoint, params=params)
                 tickets = data.get("tickets", [])
-                
+                for u in data.get("users", []):
+                    users_by_id[u["id"]] = u
+                for g in data.get("groups", []):
+                    groups_by_id[g["id"]] = g
+
                 if not tickets:
                     logger.info("Aucun ticket trouvé ou fin de pagination")
                     break
-                
+
                 page_count += 1
                 logger.info(f"Page {page_count}: {len(tickets)} tickets récupérés")
-                
-                # Normaliser chaque ticket
+
                 for ticket in tickets:
-                    yield self._normalize_ticket(ticket)
+                    yield self._normalize_ticket(ticket, users_by_id, groups_by_id)
                 
                 # Vérifier s'il y a une page suivante
                 # Zendesk peut utiliser soit "next_page" directement, soit "links.next"
@@ -165,61 +167,59 @@ class ZendeskClient:
         Yields:
             Dict: Ticket Zendesk normalisé
         """
-        # Convertir en timestamp Unix pour l'API Zendesk
         since_timestamp = int(since_datetime.timestamp())
-        
         url = None
         page_count = 0
-        
+        users_by_id = {}
+        groups_by_id = {}
+
         while True:
-            # Construire l'URL de la requête
             if url is None:
-                # Première requête
                 endpoint = "/tickets.json"
                 params = {
                     "per_page": min(page_size, 100),
                     "sort_by": "updated_at",
-                    "sort_order": "desc",  # Plus récents en premier
-                    "start_time": since_timestamp
+                    "sort_order": "desc",
+                    "start_time": since_timestamp,
+                    "include": "users,groups"
                 }
                 full_url = None
             else:
-                # Requêtes suivantes : utiliser l'URL complète du lien "next"
                 endpoint = None
                 params = None
                 full_url = url
-            
+
             try:
                 if full_url:
                     data = self._make_request("", params=None, full_url=full_url)
                 else:
                     data = self._make_request(endpoint, params=params)
                 tickets = data.get("tickets", [])
-                
+                for u in data.get("users", []):
+                    users_by_id[u["id"]] = u
+                for g in data.get("groups", []):
+                    groups_by_id[g["id"]] = g
+
                 if not tickets:
                     logger.info("Aucun ticket mis à jour trouvé")
                     break
-                
+
                 page_count += 1
                 logger.info(f"Page {page_count}: {len(tickets)} tickets mis à jour récupérés")
-                
+
                 for ticket in tickets:
-                    # Filtrer les tickets réellement mis à jour après la date
                     ticket_updated = self._parse_datetime(ticket.get("updated_at"))
                     if ticket_updated:
-                        # S'assurer que les deux dates sont timezone-aware
                         if ticket_updated.tzinfo is None:
                             from datetime import timezone
                             ticket_updated = ticket_updated.replace(tzinfo=timezone.utc)
                         if since_datetime.tzinfo is None:
                             from datetime import timezone
                             since_datetime = since_datetime.replace(tzinfo=timezone.utc)
-                        
                         if ticket_updated > since_datetime:
-                            yield self._normalize_ticket(ticket)
+                            yield self._normalize_ticket(ticket, users_by_id, groups_by_id)
                     else:
-                        # Si on ne peut pas parser la date, inclure le ticket par sécurité
-                        yield self._normalize_ticket(ticket)
+                        yield self._normalize_ticket(ticket, users_by_id, groups_by_id)
                 
                 # Vérifier s'il y a une page suivante
                 # Zendesk peut utiliser soit "next_page" directement, soit "links.next"
@@ -235,45 +235,46 @@ class ZendeskClient:
                 logger.error(f"Erreur lors de la récupération des tickets mis à jour: {e}")
                 raise
     
-    def _normalize_ticket(self, ticket: Dict) -> Dict:
+    def _normalize_ticket(self, ticket: Dict, users_by_id: Optional[Dict] = None, groups_by_id: Optional[Dict] = None) -> Dict:
         """
-        Normalise un ticket Zendesk en structure plate pour Google Sheets.
-        
-        Args:
-            ticket: Ticket brut de l'API Zendesk
-            
-        Returns:
-            Dict: Ticket normalisé avec tous les champs nécessaires
+        Normalise un ticket Zendesk en structure plate (avec noms assignee, requester, group si fournis).
         """
-        # Traiter les custom_fields
+        users_by_id = users_by_id or {}
+        groups_by_id = groups_by_id or {}
         custom_fields = ticket.get("custom_fields", [])
         custom_fields_str = ""
         if custom_fields:
-            # Format: "ID1:value1|ID2:value2|..."
-            cf_parts = []
-            for cf in custom_fields:
-                cf_id = cf.get("id", "")
-                cf_value = cf.get("value")
-                if cf_value is not None and cf_value != "":
-                    cf_parts.append(f"{cf_id}:{cf_value}")
+            cf_parts = [f"{cf.get('id', '')}:{cf.get('value')}" for cf in custom_fields if cf.get("value") not in (None, "")]
             custom_fields_str = "|".join(cf_parts)
-        
+
+        assignee_id = ticket.get("assignee_id")
+        requester_id = ticket.get("requester_id")
+        group_id = ticket.get("group_id")
+        assignee_name = users_by_id.get(assignee_id, {}).get("name", "") if assignee_id else ""
+        requester_name = users_by_id.get(requester_id, {}).get("name", "") if requester_id else ""
+        ticket_group = groups_by_id.get(group_id, {}).get("name", "") if group_id else ""
+        # ticket_form_id existe dans l'API Zendesk ; le nom nécessite un appel séparé, on laisse vide ou l'ID
+        ticket_form = str(ticket.get("ticket_form_id", "")) if ticket.get("ticket_form_id") else ""
+
         return {
             "ticket_id": ticket.get("id"),
             "subject": ticket.get("subject", ""),
             "status": ticket.get("status", ""),
             "priority": ticket.get("priority", ""),
-            "requester_id": ticket.get("requester_id"),
-            "assignee_id": ticket.get("assignee_id"),
+            "requester_id": requester_id,
+            "assignee_id": assignee_id,
             "created_at": ticket.get("created_at", ""),
             "updated_at": ticket.get("updated_at", ""),
             "tags": ", ".join(ticket.get("tags", [])) if ticket.get("tags") else "",
-            # Champs supplémentaires utiles
             "type": ticket.get("type", ""),
             "via": ticket.get("via", {}).get("channel", "") if ticket.get("via") else "",
             "url": ticket.get("url", ""),
-            "description": str(ticket.get("description", ""))[:500],  # Limiter la longueur
-            "custom_fields": custom_fields_str
+            "description": str(ticket.get("description", ""))[:500],
+            "custom_fields": custom_fields_str,
+            "assignee_name": assignee_name,
+            "requester_name": requester_name,
+            "ticket_group": ticket_group,
+            "ticket_form": ticket_form,
         }
     
     def _parse_datetime(self, date_string: Optional[str]) -> Optional[datetime]:
