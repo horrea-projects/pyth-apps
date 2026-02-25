@@ -711,9 +711,10 @@ def sync_run_incremental(request: Request):
     Enrichit tickets_all.csv. Retourne toujours du JSON si Accept: application/json (évite erreur "is not valid JSON").
     """
     accept = (request.headers.get("Accept") or "").lower()
-    if "application/json" in accept and settings.CRON_SECRET:
+    cron_secret = getattr(settings, "CRON_SECRET", None)
+    if "application/json" in accept and cron_secret:
         secret = request.query_params.get("secret") or request.headers.get("X-Cron-Secret")
-        if secret != settings.CRON_SECRET:
+        if secret != cron_secret:
             return JSONResponse({"ok": False, "error": "Secret invalide", "merged": 0}, status_code=403)
     if "application/json" in accept:
         try:

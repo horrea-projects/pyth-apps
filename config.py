@@ -49,7 +49,9 @@ class Settings(BaseSettings):
     
     # Fichier de stockage des tokens et préférences (webapp sync)
     OAUTH_DATA_FILE: str = "data/oauth_data.json"
-    
+    # Optionnel : secret pour les appels cron à /zendesk/sync/run-incremental (Accept: application/json)
+    CRON_SECRET: Optional[str] = None
+
     class Config:
         env_file = ".env"
         case_sensitive = True
