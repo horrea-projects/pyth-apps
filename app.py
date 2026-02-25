@@ -376,27 +376,30 @@ def sync_app_dashboard(request: Request):
             status_code=500,
         )
 
-    if not settings.GOOGLE_OAUTH_CLIENT_ID or not settings.GOOGLE_OAUTH_CLIENT_SECRET:
-        return HTMLResponse(
-            _sync_app_base_html()
-            + """
-            <div class="card">
-                <h1>Sync vers Google Sheet</h1>
-                <div class="alert alert-info">
-                    Configurez <code>GOOGLE_OAUTH_CLIENT_ID</code> et <code>GOOGLE_OAUTH_CLIENT_SECRET</code> dans votre fichier .env
-                    (OAuth 2.0 Client ID type « Web application » dans Google Cloud Console).
-                    Ajoutez l’URL de redirection : <code>""" + str(request.base_url).rstrip("/") + """/auth/google/callback</code>
-                </div>
-                <p><a href="/" class="btn btn-secondary">Retour</a></p>
-            </div></body></html>"""
-        )
-
-    connected = is_google_connected(settings)
-    export_files = _list_export_files()
-    oauth_data = load_oauth_data(settings)
+    oauth_configured = bool(getattr(settings, "GOOGLE_OAUTH_CLIENT_ID", None) and getattr(settings, "GOOGLE_OAUTH_CLIENT_SECRET", None))
+    try:
+        connected = is_google_connected(settings) if oauth_configured else False
+    except Exception as e:
+        logger.warning("sync_app_dashboard is_google_connected: %s", e)
+        connected = False
+    try:
+        oauth_data = load_oauth_data(settings) if SYNC_APP_AVAILABLE else {}
+    except Exception as e:
+        logger.warning("sync_app_dashboard load_oauth_data: %s", e)
+        oauth_data = {}
     sheet_id = oauth_data.get("sheet_id", "")
     sheet_name = oauth_data.get("sheet_name", "Tickets")
-    auto_update = oauth_data.get("auto_update", False)
+    try:
+        export_files = _list_export_files()
+    except Exception as e:
+        logger.warning("sync_app_dashboard _list_export_files: %s", e)
+        export_files = []
+    auth_url = "#"
+    if oauth_configured:
+        try:
+            auth_url = get_auth_url(settings, str(request.base_url).rstrip("/") + "/auth/google/callback", state="/zendesk/sync")
+        except Exception as e:
+            logger.warning("sync_app_dashboard get_auth_url: %s", e)
 
     # Messages query params
     synced = request.query_params.get("synced")
@@ -430,9 +433,9 @@ def sync_app_dashboard(request: Request):
 
     # Connexion Google (optionnelle)
     html += '<h2>Connexion Google (optionnelle)</h2>'
-    if not connected:
-        redirect_uri = str(request.base_url).rstrip("/") + "/auth/google/callback"
-        auth_url = get_auth_url(settings, redirect_uri, state="/zendesk/sync")
+    if not oauth_configured:
+        html += '<p class="small" style="color:#666;">Pour envoyer les données vers une Google Sheet, configurez <code>GOOGLE_OAUTH_CLIENT_ID</code> et <code>GOOGLE_OAUTH_CLIENT_SECRET</code> dans le fichier .env.</p>'
+    elif not connected:
         html += '<p class="small">Connectez-vous uniquement si vous souhaitez envoyer les données vers une Google Sheet.</p>'
         html += '<p><a href="' + auth_url + '" class="btn btn-primary">Se connecter avec Google</a></p>'
     else:
