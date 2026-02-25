@@ -6,6 +6,7 @@ Application FastAPI principale – plateforme de webapps (modules).
 - Module Calculs : opérations entre deux Google Sheets
 """
 
+import html
 import json
 import logging
 import time
@@ -238,12 +239,27 @@ def _format_ts(ts: float) -> str:
 @app.get("/zendesk", response_class=HTMLResponse)
 def zendesk_dashboard(request: Request):
     """Dashboard du module Zendesk : statut, derniers runs, fichiers à exporter, lien sync."""
-    status = get_status_data()
-    oauth_data = load_oauth_data(settings) if SYNC_APP_AVAILABLE else {}
-    last_sync_at = oauth_data.get("last_sync_at")  # timestamp
-    export_dir = Path(settings.EXPORT_OUTPUT_DIR)
-    all_csv = export_dir / "tickets_all.csv"
-    tickets_all_updated = all_csv.stat().st_mtime if all_csv.exists() else None
+    try:
+        status = get_status_data()
+    except Exception as e:
+        logger.exception("zendesk_dashboard get_status_data")
+        status = {"zendesk": {"connected": False}, "google_oauth": {"connected": False}}
+
+    try:
+        oauth_data = load_oauth_data(settings) if SYNC_APP_AVAILABLE else {}
+    except Exception as e:
+        logger.warning("zendesk_dashboard load_oauth_data: %s", e)
+        oauth_data = {}
+
+    last_sync_at = oauth_data.get("last_sync_at")
+    tickets_all_updated = None
+    try:
+        export_dir = Path(settings.EXPORT_OUTPUT_DIR)
+        all_csv = export_dir / "tickets_all.csv"
+        if all_csv.exists():
+            tickets_all_updated = all_csv.stat().st_mtime
+    except Exception as e:
+        logger.warning("zendesk_dashboard tickets_all mtime: %s", e)
 
     zendesk_status = "OK" if status.get("zendesk", {}).get("connected") else "Erreur"
     google_status = "Connecté" if status.get("google_oauth", {}).get("connected") else "Non connecté"
@@ -253,6 +269,10 @@ def zendesk_dashboard(request: Request):
         google_status += " · Feuille non configurée"
 
     all_files = _list_all_export_files()
+
+    # Échapper les noms de fichiers pour l'URL (éviter caractères spéciaux dans le HTML)
+    def _escape_url(s: str) -> str:
+        return quote(s, safe="")
 
     extra = f"""
     <div class="info"><strong>Mode d'export :</strong> {settings.EXPORT_MODE.upper()}</div>
@@ -268,7 +288,9 @@ def zendesk_dashboard(request: Request):
     if all_files:
         extra += "<p style=\"font-size:14px;\">Télécharger : "
         for f in all_files:
-            extra += '<a href="/zendesk/exports/download/' + f["name"] + '" download>' + f["name"] + '</a> '
+            name = f["name"]
+            safe_name = _escape_url(name)
+            extra += f'<a href="/zendesk/exports/download/{safe_name}" download>{html.escape(name)}</a> '
             extra += f'<span style="color:#666;">({_format_ts(f["modified"])})</span> '
         extra += "</p>"
     else:
@@ -317,12 +339,16 @@ def _list_export_files() -> list:
 
 def _list_all_export_files() -> list:
     """Liste tous les fichiers du répertoire exports/ (pour téléchargement). Tri par date décroissante."""
-    export_dir = Path(settings.EXPORT_OUTPUT_DIR)
-    if not export_dir.exists():
+    try:
+        export_dir = Path(settings.EXPORT_OUTPUT_DIR)
+        if not export_dir.exists() or not export_dir.is_dir():
+            return []
+        files = [p for p in export_dir.iterdir() if p.is_file()]
+        files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+        return [{"name": p.name, "path": str(p), "modified": p.stat().st_mtime} for p in files]
+    except Exception as e:
+        logger.warning("_list_all_export_files: %s", e)
         return []
-    files = [p for p in export_dir.iterdir() if p.is_file()]
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
-    return [{"name": p.name, "path": str(p), "modified": p.stat().st_mtime} for p in files]
 
 
 def _sync_app_base_html(breadcrumb: str = ""):
