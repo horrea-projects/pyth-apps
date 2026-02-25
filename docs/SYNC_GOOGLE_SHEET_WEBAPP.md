@@ -6,12 +6,13 @@ Cette fonctionnalité permet de **vous connecter avec votre compte Google** (san
 
 ## Principe
 
-1. Vous lancez les **exports Zendesk** comme d’habitude (page d’accueil → Import complet). Les CSV sont créés dans `exports/`.
-2. Vous ouvrez la **webapp Sync** (`/zendesk/sync`).
-3. Vous **vous connectez avec Google** (OAuth). Aucun Service Account : c’est votre compte personnel.
-4. Vous indiquez **quelle feuille** mettre à jour (ID + nom de l’onglet) dans **Paramètres**.
-5. Vous cliquez sur **« Mettre à jour la Google Sheet maintenant »** pour envoyer le **dernier export CSV** vers cette feuille.
-6. Optionnel : vous pouvez **planifier** des mises à jour (cron qui appelle `POST /sync-now`).
+1. **Import complet** (page Zendesk) : exporte tous les tickets Zendesk vers **`exports/tickets_all.csv`** (fichier unique enrichi pour Looker Studio).
+2. **Enrichissement incrémental** : à la fréquence choisie (24 h, 48 h, hebdo, mensuel), les tickets *mis à jour* depuis Zendesk sont fusionnés dans `tickets_all.csv` (mise à jour des lignes existantes, ajout des nouveaux).
+3. Vous ouvrez la **webapp Sync** (`/zendesk/sync`), vous **connectez avec Google** (OAuth).
+4. Dans **Paramètres** vous indiquez la feuille cible (ID + onglet) et la **fréquence d’enrichissement** (24 h, 48 h, hebdo, mensuel).
+5. **« Enrichir maintenant »** : lance tout de suite une fusion incrémentale dans `tickets_all.csv`.
+6. **« Mettre à jour la Google Sheet maintenant »** : envoie **`tickets_all.csv`** vers votre feuille Google (pour Looker Studio).
+7. Optionnel : **cron** pour enrichissement automatique (`POST /zendesk/sync/run-incremental`) et/ou mise à jour de la feuille (`POST /sync-now`).
 
 ---
 
@@ -61,21 +62,27 @@ Aucun fichier `credentials.json` (Service Account) n’est nécessaire.
 
 ### Paramètres
 
-- **Paramètres (feuille, mise à jour auto)** :
+- **Paramètres (feuille, fréquence, mise à jour auto)** :
   - **ID de la feuille** : l’ID dans l’URL de votre Google Sheet  
     `https://docs.google.com/spreadsheets/d/ID_ICI/edit`
   - **Nom de l’onglet** : par ex. `Tickets` (sera créé s’il n’existe pas).
-  - **Mise à jour automatique** : case à cocher. Si activée, il faut configurer une tâche planifiée (cron) qui appelle `POST /sync-now` à l’heure voulue.
+  - **Enrichissement tickets_all.csv** : fréquence des mises à jour incrémentales (24 h, 48 h, hebdo, mensuel). Les tickets Zendesk mis à jour depuis cette durée sont fusionnés dans `exports/tickets_all.csv`.
+  - **Mise à jour auto de la Google Sheet** : si activée, prévoir un cron qui appelle `POST /sync-now` pour envoyer `tickets_all.csv` vers la feuille.
 
-### Mise à jour manuelle
+### Enrichissement et sync
 
-- Sur le dashboard, cliquez sur **« Mettre à jour la Google Sheet maintenant »**.
-- Le **dernier fichier CSV** dans `exports/` (par date de modification) est envoyé vers la feuille configurée.
+- **« Enrichir maintenant »** : récupère les tickets Zendesk mis à jour (selon la fréquence configurée) et les fusionne dans `tickets_all.csv`. Utilisable avant d’envoyer la feuille vers Looker Studio.
+- **« Mettre à jour la Google Sheet maintenant »** : envoie **`tickets_all.csv`** (prioritaire s’il existe) vers la feuille configurée.
 
-### Mise à jour planifiée
+### Mise à jour planifiée (cron)
 
-- Sur PythonAnywhere : **Schedule** → nouvelle tâche qui exécute par exemple un `curl -X POST https://VOTRE_USER.pythonanywhere.com/sync-now` (en protégeant l’URL par un secret si besoin).
-- En local : cron ou Task Scheduler qui fait la même requête POST.
+- **Enrichissement** (fusion incrémentale dans `tickets_all.csv`) :  
+  `POST /zendesk/sync/run-incremental`  
+  Avec optionnel `CRON_SECRET` en variable d’environnement, les appels API (Accept: application/json) doivent envoyer `?secret=CRON_SECRET` ou l’en-tête `X-Cron-Secret`. Exemple :  
+  `curl -X POST "https://VOTRE_USER.pythonanywhere.com/zendesk/sync/run-incremental?secret=VOTRE_SECRET" -H "Accept: application/json"`
+- **Sync vers la feuille** :  
+  `POST /sync-now`  
+  Exemple : `curl -X POST https://VOTRE_USER.pythonanywhere.com/sync-now`
 
 ---
 

@@ -250,12 +250,19 @@ def zendesk_dashboard(request: Request):
 # ---------- Zendesk : Sync vers Google Sheet ----------
 
 def _list_export_files() -> list:
-    """Liste les fichiers CSV dans le dossier exports, du plus récent au plus ancien."""
+    """Liste les fichiers CSV : tickets_all.csv en premier (base pour sync Looker Studio), puis les autres par date."""
     export_dir = Path(settings.EXPORT_OUTPUT_DIR)
     if not export_dir.exists():
         return []
     files = list(export_dir.glob("tickets_*.csv"))
-    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    # tickets_all.csv en premier pour la sync vers Google Sheet
+    all_path = export_dir / "tickets_all.csv"
+    rest = [p for p in files if p.name != "tickets_all.csv"]
+    rest.sort(key=lambda p: p.stat().st_mtime, reverse=True)
+    if all_path.exists():
+        files = [all_path] + rest
+    else:
+        files = rest
     return [{"name": p.name, "path": str(p), "modified": p.stat().st_mtime} for p in files]
 
 
@@ -304,6 +311,8 @@ def sync_app_dashboard(request: Request):
     # Messages query params
     synced = request.query_params.get("synced")
     err = request.query_params.get("error")
+    incremental_merged = request.query_params.get("incremental_merged")
+    incremental_error = request.query_params.get("incremental_error")
 
     html = _sync_app_base_html("Zendesk / Sync")
     html += '<div class="card"><h1>Sync vers Google Sheet</h1>'
@@ -311,6 +320,10 @@ def sync_app_dashboard(request: Request):
         html += f'<div class="alert alert-success">Feuille mise à jour : {synced} lignes envoyées.</div>'
     if err:
         html += f'<div class="alert alert-error">Erreur : {err}</div>'
+    if incremental_merged is not None:
+        html += f'<div class="alert alert-success">Enrichissement : {incremental_merged} ticket(s) fusionnés dans tickets_all.csv.</div>'
+    if incremental_error:
+        html += f'<div class="alert alert-error">Enrichissement : {incremental_error}</div>'
 
     if not connected:
         redirect_uri = str(request.base_url).rstrip("/") + "/auth/google/callback"
@@ -323,9 +336,12 @@ def sync_app_dashboard(request: Request):
         """
     else:
         html += '<div class="alert alert-success">Compte Google connecté.</div>'
-        html += '<p><a href="/zendesk/sync/settings" class="btn btn-secondary">Paramètres (feuille, mise à jour auto)</a> '
+        html += '<p><a href="/zendesk/sync/settings" class="btn btn-secondary">Paramètres (feuille, fréquence, mise à jour auto)</a> '
         html += '<form method="post" action="/auth/disconnect" style="display:inline;"><button type="submit" class="btn btn-danger">Déconnexion</button></form></p>'
-        html += '<h2>Mise à jour manuelle</h2>'
+        html += '<h2>Enrichissement tickets_all.csv</h2>'
+        html += '<p class="small">Récupère les tickets Zendesk mis à jour (selon la fréquence dans Paramètres) et les fusionne dans <code>exports/tickets_all.csv</code>. Fichier utilisé pour la sync vers la feuille et Looker Studio.</p>'
+        html += '<form method="post" action="/zendesk/sync/run-incremental" style="display:inline;"><button type="submit" class="btn btn-secondary">Enrichir maintenant</button></form>'
+        html += '<h2>Mise à jour manuelle – Google Sheet</h2>'
         if not sheet_id:
             html += '<div class="alert alert-info">Définissez l’ID de la feuille dans <a href="/zendesk/sync/settings">Paramètres</a>.</div>'
         else:
@@ -387,6 +403,9 @@ def sync_app_settings_page():
     sheet_id = oauth_data.get("sheet_id", "")
     sheet_name = oauth_data.get("sheet_name", "Tickets")
     auto_update = oauth_data.get("auto_update", False)
+    sync_frequency = oauth_data.get("sync_frequency", "24h")
+    freq_options = [("24h", "Toutes les 24 h"), ("48h", "Toutes les 48 h"), ("weekly", "Hebdo (7 j)"), ("monthly", "Mensuel (30 j)")]
+    freq_select = "".join('<option value="%s"%s>%s</option>' % (v, " selected" if v == sync_frequency else "", l) for v, l in freq_options)
 
     html = _sync_app_base_html("Zendesk / Sync / Paramètres")
     html += """<div class="card">
@@ -399,6 +418,9 @@ def sync_app_settings_page():
             <input type="text" name="sheet_name" id="sheet_name" value=\"""" + (sheet_name or "Tickets") + """\" placeholder="Tickets">
             <p id="verify-result" class="small" style="margin-top:8px;min-height:1.2em;"></p>
             <p style="margin-top:12px;"><button type="button" id="btn-verify" class="btn btn-secondary">Vérifier la feuille et l'onglet</button></p>
+            <label style="margin-top:16px;">Enrichissement tickets_all.csv</label>
+            <p class="small">Fréquence des mises à jour incrémentales Zendesk (fusion dans tickets_all.csv).</p>
+            <select name="sync_frequency" style="padding:8px;min-width:200px;">""" + freq_select + """</select>
             <label style="margin-top:12px;"><input type="checkbox" name="auto_update" """ + ("checked" if auto_update else "") + """> Mise à jour automatique (planifiée)</label>
             <p class="small">Si activé, configurez une tâche cron pour appeler POST /sync-now régulièrement.</p>
             <p style="margin-top:16px;"><button type="submit" class="btn btn-primary">Enregistrer</button></p>
@@ -447,14 +469,18 @@ def sync_app_settings_save(
     request: Request,
     sheet_id: str = Form(""),
     sheet_name: str = Form("Tickets"),
+    sync_frequency: str = Form("24h"),
     auto_update: Optional[str] = Form(None),
 ):
-    """Enregistre les paramètres (feuille, mise à jour auto)."""
+    """Enregistre les paramètres (feuille, fréquence enrichissement, mise à jour auto)."""
     if not SYNC_APP_AVAILABLE:
         raise HTTPException(status_code=503, detail="Module non disponible")
+    if sync_frequency not in ("24h", "48h", "weekly", "monthly"):
+        sync_frequency = "24h"
     oauth_data = load_oauth_data(settings)
     oauth_data["sheet_id"] = sheet_id.strip()
     oauth_data["sheet_name"] = (sheet_name or "Tickets").strip()
+    oauth_data["sync_frequency"] = sync_frequency
     oauth_data["auto_update"] = auto_update == "on"
     save_oauth_data(settings, oauth_data)
     return RedirectResponse("/zendesk/sync", status_code=302)
@@ -485,6 +511,50 @@ def sync_now():
     if result["success"]:
         return RedirectResponse("/zendesk/sync?synced=" + str(result["rows_written"]))
     raise HTTPException(status_code=500, detail=result.get("message", "Erreur inconnue"))
+
+
+def _sync_frequency_hours(sync_frequency: str) -> int:
+    """Retourne le nombre d'heures pour la fréquence (24h, 48h, weekly, monthly)."""
+    return {"24h": 24, "48h": 48, "weekly": 24 * 7, "monthly": 24 * 30}.get(sync_frequency, 24)
+
+
+@app.post("/zendesk/sync/run-incremental")
+def sync_run_incremental(request: Request):
+    """
+    Enrichit tickets_all.csv : récupère les tickets Zendesk mis à jour depuis X h (selon paramètres)
+    et les fusionne dans exports/tickets_all.csv. Appelable par cron (optionnel : ?secret=CRON_SECRET).
+    """
+    # Cron (Accept: application/json) : exiger le secret si configuré
+    accept = (request.headers.get("Accept") or "").lower()
+    if "application/json" in accept and settings.CRON_SECRET:
+        secret = request.query_params.get("secret") or request.headers.get("X-Cron-Secret")
+        if secret != settings.CRON_SECRET:
+            raise HTTPException(status_code=403, detail="Secret invalide")
+    try:
+        zendesk = get_zendesk_client()
+        if not zendesk.test_connection():
+            raise HTTPException(status_code=503, detail="Connexion Zendesk échouée")
+        oauth_data = load_oauth_data(settings)
+        sync_frequency = oauth_data.get("sync_frequency", "24h")
+        hours = _sync_frequency_hours(sync_frequency)
+        since = datetime.now() - timedelta(hours=hours)
+        export_client_csv = ExportClient(output_dir=settings.EXPORT_OUTPUT_DIR, file_format="csv")
+        tickets = list(zendesk.get_tickets_updated_since(since))
+        if not tickets:
+            if "application/json" in (request.headers.get("Accept") or "").lower():
+                return JSONResponse({"ok": True, "message": "Aucun ticket mis à jour", "merged": 0})
+            return RedirectResponse("/zendesk/sync?incremental_merged=0")
+        path = export_client_csv.merge_incremental_into_all(tickets)
+        if "application/json" in (request.headers.get("Accept") or "").lower():
+            return JSONResponse({"ok": True, "message": "tickets_all.csv mis à jour", "merged": len(tickets), "path": path})
+        return RedirectResponse("/zendesk/sync?incremental_merged=" + str(len(tickets)))
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("run-incremental")
+        if "application/json" in (request.headers.get("Accept") or "").lower():
+            raise HTTPException(status_code=500, detail=str(e))
+        return RedirectResponse("/zendesk/sync?incremental_error=" + str(e).replace(" ", "%20")[:80])
 
 
 # ---------- Module Calculs entre deux Google Sheets ----------
@@ -698,18 +768,18 @@ def process_full_import():
         if tickets:
             if settings.EXPORT_MODE == "gsheet":
                 export_client.write_tickets(tickets, append=True)
+            elif settings.EXPORT_MODE == "csv":
+                if first_batch:
+                    export_client.export_to_csv(tickets, filename=filename)
+                else:
+                    export_client.export_to_csv(tickets, filename=filename, append=True)
+                logger.info(f"Fichier final: {filename}")
             else:
                 if first_batch:
-                    # Premier et seul batch
                     filename = export_client.export(tickets)
-                    logger.info(f"Fichier créé: {filename}")
                 else:
-                    # Dernier batch : ajouter au fichier existant
-                    if settings.EXPORT_MODE == "csv":
-                        export_client.export_to_csv(tickets, filename=filename, append=True)
-                    else:
-                        filename = export_client.export(tickets)
-                        logger.info(f"Nouveau fichier créé: {filename}")
+                    filename = export_client.export(tickets)
+                logger.info(f"Fichier final: {filename}")
         
         logger.info(f"Import complet terminé: {count} tickets traités")
         if filename:

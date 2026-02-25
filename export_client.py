@@ -13,22 +13,26 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
-# En-têtes par défaut pour les fichiers
+# Fichier unique enrichi (base pour Looker Studio), mis à jour par import complet + incrémental
+ALL_TICKETS_FILENAME = "tickets_all.csv"
+
+# En-têtes par défaut pour les fichiers (alignés sur tickets_all.csv)
 DEFAULT_HEADERS = [
-    "ticket_id",
-    "subject",
-    "status",
-    "priority",
-    "requester_id",
-    "assignee_id",
-    "created_at",
-    "updated_at",
-    "tags",
-    "type",
-    "via",
-    "url",
-    "description",
-    "custom_fields"
+    "Ticket ID",
+    "Ticket status",
+    "Ticket group",
+    "Assignee name",
+    "Ticket created - Date",
+    "Ticket solved - Date",
+    "Ticket brand",
+    "Ticket channel",
+    "Ticket form",
+    "Ticket priority",
+    "Ticket subject",
+    "Ticket type",
+    "Requester name",
+    "Ticket organisation name",
+    "Tickets",
 ]
 
 
@@ -51,7 +55,11 @@ class ExportClient:
         
         if self.file_format not in ['csv', 'xlsx']:
             raise ValueError(f"Format non supporté: {file_format}. Utilisez 'csv' ou 'xlsx'")
-    
+
+    def get_all_tickets_path(self) -> Path:
+        """Chemin du fichier cumulatif tickets_all.csv (base enrichie pour Looker Studio)."""
+        return self.output_dir / ALL_TICKETS_FILENAME
+
     def _get_filename(self, prefix: str = "tickets") -> str:
         """
         Génère un nom de fichier avec timestamp.
@@ -69,29 +77,24 @@ class ExportClient:
     
     def _ticket_to_row(self, ticket: Dict) -> List:
         """
-        Convertit un ticket en liste de valeurs pour une ligne.
-        
-        Args:
-            ticket: Ticket normalisé
-            
-        Returns:
-            List: Liste de valeurs dans l'ordre des en-têtes
+        Convertit un ticket en liste de valeurs pour une ligne (ordre = DEFAULT_HEADERS).
         """
         return [
-            ticket.get("ticket_id", ""),
-            ticket.get("subject", ""),
+            str(ticket.get("ticket_id", "")),
             ticket.get("status", ""),
-            ticket.get("priority", ""),
-            ticket.get("requester_id", ""),
-            ticket.get("assignee_id", ""),
+            ticket.get("ticket_group", ""),
+            ticket.get("assignee_name", ""),
             ticket.get("created_at", ""),
             ticket.get("updated_at", ""),
-            ticket.get("tags", ""),
-            ticket.get("type", ""),
+            ticket.get("brand", ""),
             ticket.get("via", ""),
-            ticket.get("url", ""),
-            ticket.get("description", ""),
-            ticket.get("custom_fields", "")
+            ticket.get("ticket_form", ""),
+            ticket.get("priority", ""),
+            ticket.get("subject", ""),
+            ticket.get("type", ""),
+            ticket.get("requester_name", ""),
+            ticket.get("organisation_name", ""),
+            ticket.get("tickets", "1"),
         ]
     
     def export_to_csv(self, tickets: List[Dict], filename: Optional[str] = None, append: bool = False) -> str:
@@ -250,4 +253,39 @@ class ExportClient:
         else:
             # Nouveau fichier ou format Excel (Excel ne supporte pas l'ajout facilement)
             return self.export(tickets, str(filename))
+
+    def merge_incremental_into_all(self, tickets: List[Dict]) -> str:
+        """
+        Fusionne les tickets (mis à jour ou nouveaux) dans tickets_all.csv.
+        Par ticket_id : met à jour la ligne existante ou ajoute une nouvelle.
+        Préserve l'ordre par ticket_id (numérique).
+        """
+        path = self.get_all_tickets_path()
+        existing: Dict[str, list] = {}
+        if path.exists():
+            with open(path, "r", encoding="utf-8") as f:
+                reader = csv.reader(f)
+                next(reader, None)  # skip header
+                for row in reader:
+                    if row and str(row[0]).strip():
+                        existing[str(row[0]).strip()] = row
+        for t in tickets:
+            tid = str(t.get("ticket_id", "")).strip()
+            existing[tid] = self._ticket_to_row(t)
+        # Ordre : ticket_id numérique croissant, puis non-numériques
+        def row_sort_key(row: list):
+            if not row:
+                return (1, "")
+            try:
+                return (0, int(row[0]))
+            except (ValueError, TypeError):
+                return (1, str(row[0]))
+
+        sorted_rows = sorted(existing.values(), key=row_sort_key)
+        with open(path, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f, delimiter=",", quotechar='"', quoting=csv.QUOTE_MINIMAL)
+            writer.writerow(DEFAULT_HEADERS)
+            writer.writerows(sorted_rows)
+        logger.info(f"tickets_all.csv mis à jour : {len(existing)} lignes ({len(tickets)} tickets fusionnés)")
+        return str(path)
 

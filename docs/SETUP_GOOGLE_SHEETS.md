@@ -42,7 +42,7 @@
 ## 📁 Étape 5 : Placer le fichier credentials.json
 
 1. Renommez le fichier JSON téléchargé en `credentials.json`
-2. Déplacez-le dans le dossier du projet : `/Users/leocarre/Documents/DEV/Horrea/Zendesk Connector/`
+2. Déplacez-le dans le dossier du projet : `/Users/.../Documents/DEV/Horrea/Zendesk Connector/`
 3. Vérifiez que le fichier est bien présent à la racine du projet
 
 ## 🔗 Étape 6 : Partager votre Google Sheet avec le Service Account
@@ -82,15 +82,18 @@ Vous devriez voir que `gsheet_connected` est `true`.
 ## ❓ Dépannage
 
 ### Erreur : "FileNotFoundError: credentials.json"
+
 - Vérifiez que le fichier `credentials.json` est bien dans le dossier du projet
 - Vérifiez le chemin dans `.env` : `GOOGLE_SHEETS_CREDENTIALS_PATH=credentials.json`
 
 ### Erreur : "Permission denied" ou "403 Forbidden"
+
 - Vérifiez que vous avez bien partagé la feuille avec l'email du Service Account
 - Vérifiez que les permissions sont sur "Éditeur" (pas "Lecteur")
 - Vérifiez que l'email du Service Account est correct (trouvable dans `credentials.json`)
 
 ### Erreur : "API not enabled"
+
 - Vérifiez que les APIs Google Sheets et Google Drive sont bien activées dans Google Cloud Console
 
 ## 📝 Résumé des informations importantes
@@ -98,4 +101,3 @@ Vous devriez voir que `gsheet_connected` est `true`.
 - **ID de votre feuille** : `1-0uyOH7xwU8OfFkm2gJKUZt-6pfx_ScTnfDmyW_BuuY`
 - **Fichier credentials** : `credentials.json` (à placer à la racine du projet)
 - **Email du Service Account** : Trouvable dans `credentials.json` sous `"client_email"`
-
