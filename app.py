@@ -224,25 +224,56 @@ def _zendesk_page_html(extra: str = "") -> str:
     )
 
 
+def _format_ts(ts: float) -> str:
+    """Formate un timestamp (mtime ou epoch) pour affichage."""
+    if not ts:
+        return "—"
+    try:
+        dt = datetime.fromtimestamp(ts)
+        return dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        return "—"
+
+
 @app.get("/zendesk", response_class=HTMLResponse)
 def zendesk_dashboard(request: Request):
-    """Dashboard du module Zendesk : export + lien vers sync."""
-    started = request.query_params.get("started")
-    alert = ""
-    if started == "full":
-        alert = '<div class="alert alert-success" style="margin-bottom:16px;">Import complet démarré en arrière-plan. Consultez les logs pour la progression.</div>'
-    elif started == "incremental":
-        alert = '<div class="alert alert-success" style="margin-bottom:16px;">Import incrémental démarré en arrière-plan. Consultez les logs pour la progression.</div>'
+    """Dashboard du module Zendesk : statut, derniers runs, fichiers à exporter, lien sync."""
+    status = get_status_data()
+    oauth_data = load_oauth_data(settings) if SYNC_APP_AVAILABLE else {}
+    last_sync_at = oauth_data.get("last_sync_at")  # timestamp
+    export_dir = Path(settings.EXPORT_OUTPUT_DIR)
+    all_csv = export_dir / "tickets_all.csv"
+    tickets_all_updated = all_csv.stat().st_mtime if all_csv.exists() else None
+
+    zendesk_status = "OK" if status.get("zendesk", {}).get("connected") else "Erreur"
+    google_status = "Connecté" if status.get("google_oauth", {}).get("connected") else "Non connecté"
+    if oauth_data.get("sheet_id"):
+        google_status += " · Feuille configurée"
+    else:
+        google_status += " · Feuille non configurée"
+
+    all_files = _list_all_export_files()
+
     extra = f"""
-    {alert}
     <div class="info"><strong>Mode d'export :</strong> {settings.EXPORT_MODE.upper()}</div>
-    <p><strong>Export Zendesk</strong></p>
-    <form method="POST" action="/import/full" style="display:inline;" onsubmit="return confirm('Import complet ?');">
-        <button type="submit" class="button btn-green">Import complet</button>
-    </form>
-    <form method="POST" action="/import/incremental" style="display:inline;" onsubmit="return confirm('Import incrémental (24h) ?');">
-        <button type="submit" class="button btn-blue">Import incrémental</button>
-    </form>
+    <h2>Statut & derniers runs</h2>
+    <table style="max-width:520px; border-collapse:collapse; font-size:14px;"><tbody>
+        <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Fichier tickets_all.csv</td><td style="padding:6px 0;">Dernière mise à jour : {_format_ts(tickets_all_updated)}</td></tr>
+        <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Google Sheet</td><td style="padding:6px 0;">Dernière sync : {_format_ts(last_sync_at)}</td></tr>
+        <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Zendesk</td><td style="padding:6px 0;">{zendesk_status}</td></tr>
+        <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Google (OAuth / feuille)</td><td style="padding:6px 0;">{google_status}</td></tr>
+    </tbody></table>
+    <h2>Fichiers d'export</h2>
+    """
+    if all_files:
+        extra += "<p style=\"font-size:14px;\">Télécharger : "
+        for f in all_files:
+            extra += '<a href="/zendesk/exports/download/' + f["name"] + '" download>' + f["name"] + '</a> '
+            extra += f'<span style="color:#666;">({_format_ts(f["modified"])})</span> '
+        extra += "</p>"
+    else:
+        extra += '<p style="font-size:14px; color:#666;">Aucun fichier dans <code>exports/</code>.</p>'
+    extra += """
     <p style="margin-top:20px;"><a href="/zendesk/sync" class="btn btn-blue">Sync vers Google Sheet</a></p>
     <p style="margin-top:24px;"><a href="/" class="btn btn-secondary">Accueil</a></p>
     """
@@ -274,7 +305,6 @@ def _list_export_files() -> list:
     if not export_dir.exists():
         return []
     files = list(export_dir.glob("tickets_*.csv"))
-    # tickets_all.csv en premier pour la sync vers Google Sheet
     all_path = export_dir / "tickets_all.csv"
     rest = [p for p in files if p.name != "tickets_all.csv"]
     rest.sort(key=lambda p: p.stat().st_mtime, reverse=True)
@@ -282,6 +312,16 @@ def _list_export_files() -> list:
         files = [all_path] + rest
     else:
         files = rest
+    return [{"name": p.name, "path": str(p), "modified": p.stat().st_mtime} for p in files]
+
+
+def _list_all_export_files() -> list:
+    """Liste tous les fichiers du répertoire exports/ (pour téléchargement). Tri par date décroissante."""
+    export_dir = Path(settings.EXPORT_OUTPUT_DIR)
+    if not export_dir.exists():
+        return []
+    files = [p for p in export_dir.iterdir() if p.is_file()]
+    files.sort(key=lambda p: p.stat().st_mtime, reverse=True)
     return [{"name": p.name, "path": str(p), "modified": p.stat().st_mtime} for p in files]
 
 
@@ -329,6 +369,7 @@ def sync_app_dashboard(request: Request):
 
     # Messages query params
     synced = request.query_params.get("synced")
+    already_updated = request.query_params.get("already_updated")
     last_ids = request.query_params.get("last", "")
     err = request.query_params.get("error")
     incremental_merged = request.query_params.get("incremental_merged")
@@ -336,7 +377,13 @@ def sync_app_dashboard(request: Request):
 
     html = _sync_app_base_html("Zendesk / Sync")
     html += '<div class="card"><h1>Sync vers Google Sheet</h1>'
-    if synced:
+    if already_updated:
+        msg = "Déjà à jour avec les derniers tickets intégrés."
+        if last_ids:
+            ids_list = last_ids.replace("%2C", ",").split(",")[:3]
+            msg += " Derniers tickets : " + ", ".join(ids_list) + "."
+        html += f'<div class="alert alert-success">{msg}</div>'
+    elif synced:
         msg = f"Feuille mise à jour : {synced} ligne(s) envoyées."
         if last_ids:
             ids_list = last_ids.replace("%2C", ",").split(",")[:3]
@@ -371,13 +418,13 @@ def sync_app_dashboard(request: Request):
         else:
             if export_files:
                 latest = export_files[0]
-                html += f'<p class="small">Dernier export : <strong>{latest["name"]}</strong></p>'
+                html += f'<p class="small">Base pour la sync : <strong>{latest["name"]}</strong></p>'
                 html += """
                 <form method="post" action="/sync-now">
                     <p><button type="submit" class="btn btn-success">Mettre à jour la Google Sheet maintenant</button></p>
                 </form>
                 <p class="small" style="margin-top:12px;">Télécharger : """
-                for f in export_files[:10]:
+                for f in _list_all_export_files():
                     html += '<a href="/zendesk/exports/download/' + f["name"] + '" download>' + f["name"] + '</a> '
                 html += """</p>
                 """
@@ -395,13 +442,17 @@ def sync_app_dashboard(request: Request):
             out.style.color = '';
             btn.disabled = true;
             fetch('/zendesk/sync/run-incremental', { method: 'POST', headers: { 'Accept': 'application/json' } })
-                .then(function(r) { return r.json(); })
+                .then(function(r) {
+                    var ct = r.headers.get('Content-Type') || '';
+                    if (!r.ok && ct.indexOf('json') === -1) return r.text().then(function(t) { throw new Error(t.slice(0, 200) || 'Erreur ' + r.status); });
+                    return r.json();
+                })
                 .then(function(d) {
                     if (d.ok) { out.textContent = (d.merged !== undefined ? d.merged + ' ticket(s) fusionnés.' : (d.message || 'OK')); out.style.color = 'green'; }
                     else { out.textContent = 'Erreur : ' + (d.error || d.detail || 'inconnue'); out.style.color = '#c00'; }
                     btn.disabled = false;
                 })
-                .catch(function(e) { out.textContent = 'Erreur : ' + e.message; out.style.color = '#c00'; btn.disabled = false; });
+                .catch(function(e) { out.textContent = 'Erreur : ' + (e.message || e); out.style.color = '#c00'; btn.disabled = false; });
         };
     })();
     </script></div></body></html>"""
@@ -567,6 +618,18 @@ def sync_now():
         return RedirectResponse("/zendesk/sync?error=" + quote(str(e)[:200]), status_code=302)
 
     if result["success"]:
+        try:
+            oauth_data = load_oauth_data(settings)
+            oauth_data["last_sync_at"] = time.time()
+            save_oauth_data(settings, oauth_data)
+        except Exception as e:
+            logger.warning("Impossible d'enregistrer last_sync_at: %s", e)
+        if result.get("already_up_to_date"):
+            q = "already_updated=1"
+            last = result.get("last_ticket_ids") or []
+            if last:
+                q += "&last=" + quote(",".join(last))
+            return RedirectResponse("/zendesk/sync?" + q, status_code=302)
         q = "synced=" + str(result["rows_written"])
         last = result.get("last_ticket_ids") or []
         if last:
@@ -589,7 +652,8 @@ def zendesk_export_download(filename: str):
     path = (base / filename).resolve()
     if not path.is_file() or not str(path).startswith(str(base)):
         raise HTTPException(status_code=404, detail="Fichier introuvable")
-    return FileResponse(path, filename=path.name, media_type="text/csv")
+    media_type = "text/csv" if path.suffix.lower() == ".csv" else "application/octet-stream"
+    return FileResponse(path, filename=path.name, media_type=media_type)
 
 
 @app.get("/zendesk/sync/run-incremental")
@@ -598,43 +662,48 @@ def sync_run_incremental_get():
     return RedirectResponse("/zendesk/sync?error=" + quote("Utilisez le bouton « Enrichir maintenant » sur cette page."), status_code=302)
 
 
+def _run_incremental_json(accept: str) -> dict:
+    """Logique enrichissement incrémental ; retourne un dict pour JSON (ok, message/error, merged)."""
+    zendesk = get_zendesk_client()
+    if not zendesk.test_connection():
+        return {"ok": False, "error": "Connexion Zendesk échouée", "merged": 0}
+    oauth_data = load_oauth_data(settings)
+    sync_frequency = oauth_data.get("sync_frequency", "24h")
+    hours = _sync_frequency_hours(sync_frequency)
+    since = datetime.now() - timedelta(hours=hours)
+    export_client_csv = ExportClient(output_dir=settings.EXPORT_OUTPUT_DIR, file_format="csv")
+    tickets = list(zendesk.get_tickets_updated_since(since))
+    if not tickets:
+        return {"ok": True, "message": "Aucun ticket mis à jour", "merged": 0}
+    path = export_client_csv.merge_incremental_into_all(tickets)
+    return {"ok": True, "message": "tickets_all.csv mis à jour", "merged": len(tickets), "path": path}
+
+
 @app.post("/zendesk/sync/run-incremental")
 def sync_run_incremental(request: Request):
     """
-    Enrichit tickets_all.csv : récupère les tickets Zendesk mis à jour depuis X h (selon paramètres)
-    et les fusionne dans exports/tickets_all.csv. Appelable par cron (optionnel : ?secret=CRON_SECRET).
+    Enrichit tickets_all.csv. Retourne toujours du JSON si Accept: application/json (évite erreur "is not valid JSON").
     """
-    # Cron (Accept: application/json) : exiger le secret si configuré
     accept = (request.headers.get("Accept") or "").lower()
     if "application/json" in accept and settings.CRON_SECRET:
         secret = request.query_params.get("secret") or request.headers.get("X-Cron-Secret")
         if secret != settings.CRON_SECRET:
-            raise HTTPException(status_code=403, detail="Secret invalide")
+            return JSONResponse({"ok": False, "error": "Secret invalide", "merged": 0}, status_code=403)
+    if "application/json" in accept:
+        try:
+            out = _run_incremental_json(accept)
+            return JSONResponse(out)
+        except Exception as e:
+            logger.exception("run-incremental")
+            return JSONResponse({"ok": False, "error": str(e)[:500], "merged": 0}, status_code=500)
     try:
-        zendesk = get_zendesk_client()
-        if not zendesk.test_connection():
-            raise HTTPException(status_code=503, detail="Connexion Zendesk échouée")
-        oauth_data = load_oauth_data(settings)
-        sync_frequency = oauth_data.get("sync_frequency", "24h")
-        hours = _sync_frequency_hours(sync_frequency)
-        since = datetime.now() - timedelta(hours=hours)
-        export_client_csv = ExportClient(output_dir=settings.EXPORT_OUTPUT_DIR, file_format="csv")
-        tickets = list(zendesk.get_tickets_updated_since(since))
-        if not tickets:
-            if "application/json" in (request.headers.get("Accept") or "").lower():
-                return JSONResponse({"ok": True, "message": "Aucun ticket mis à jour", "merged": 0})
-            return RedirectResponse("/zendesk/sync?incremental_merged=0")
-        path = export_client_csv.merge_incremental_into_all(tickets)
-        if "application/json" in (request.headers.get("Accept") or "").lower():
-            return JSONResponse({"ok": True, "message": "tickets_all.csv mis à jour", "merged": len(tickets), "path": path})
-        return RedirectResponse("/zendesk/sync?incremental_merged=" + str(len(tickets)))
-    except HTTPException:
-        raise
+        out = _run_incremental_json(accept)
+        if out.get("ok"):
+            return RedirectResponse("/zendesk/sync?incremental_merged=" + str(out.get("merged", 0)))
+        return RedirectResponse("/zendesk/sync?incremental_error=" + quote(out.get("error", "Erreur")[:80]))
     except Exception as e:
         logger.exception("run-incremental")
-        if "application/json" in (request.headers.get("Accept") or "").lower():
-            raise HTTPException(status_code=500, detail=str(e))
-        return RedirectResponse("/zendesk/sync?incremental_error=" + str(e).replace(" ", "%20")[:80])
+        return RedirectResponse("/zendesk/sync?incremental_error=" + quote(str(e)[:80]))
 
 
 # ---------- Module Calculs entre deux Google Sheets ----------

@@ -33,7 +33,7 @@ def sync_csv_to_sheet(credentials, sheet_id: str, sheet_name: str, csv_path: str
     - Efface le contenu puis écrit en-têtes + données par batches
 
     Returns:
-        dict avec "success", "message", "rows_written"
+        dict avec "success", "message", "rows_written", optionnel "already_up_to_date", "last_ticket_ids"
     """
     from googleapiclient.discovery import build
     from googleapiclient.errors import HttpError
@@ -46,20 +46,54 @@ def sync_csv_to_sheet(credentials, sheet_id: str, sheet_name: str, csv_path: str
     if not headers:
         return {"success": False, "message": "CSV vide ou sans en-têtes", "rows_written": 0, "last_ticket_ids": []}
 
+    def _last_ticket_ids(rows_list: List[List]) -> List[str]:
+        out = []
+        for row in (rows_list[-3:] if len(rows_list) >= 3 else rows_list):
+            if row and len(row) > 0:
+                out.append(str(row[0]).strip())
+        return out
+
     try:
         service = build("sheets", "v4", credentials=credentials)
         spreadsheet = service.spreadsheets()
 
         num_cols = len(headers)
         total_rows = 1 + len(rows)
-        # Au moins 1 ligne et colonnes A–Z pour éviter les erreurs API
         required_rows = max(1, total_rows)
         required_cols = max(26, num_cols)
 
-        # Récupérer les onglets et redimensionner la grille si besoin
         meta = spreadsheet.get(spreadsheetId=sheet_id).execute()
         sheets_list = meta.get("sheets", [])
         sheet_titles = [s["properties"]["title"] for s in sheets_list]
+
+        if sheet_name in sheet_titles and rows:
+            sheet_props = next(
+                (s["properties"] for s in sheets_list if s["properties"]["title"] == sheet_name),
+                None,
+            )
+            if sheet_props:
+                grid = sheet_props.get("gridProperties", {})
+                current_rows = grid.get("rowCount", 0)
+                if current_rows == total_rows:
+                    last_cell_range = f"'{sheet_name}'!A{total_rows}:A{total_rows}"
+                    try:
+                        last_val = spreadsheet.values().get(
+                            spreadsheetId=sheet_id,
+                            range=last_cell_range,
+                        ).execute()
+                        values = last_val.get("values") or []
+                        existing_last = (values[0][0] if values and values[0] else "").strip()
+                        csv_last = str(rows[-1][0]).strip()
+                        if existing_last == csv_last:
+                            return {
+                                "success": True,
+                                "message": "Feuille déjà à jour.",
+                                "rows_written": 0,
+                                "already_up_to_date": True,
+                                "last_ticket_ids": _last_ticket_ids(rows),
+                            }
+                    except HttpError:
+                        pass
 
         if sheet_name not in sheet_titles:
             spreadsheet.batchUpdate(
@@ -145,17 +179,12 @@ def sync_csv_to_sheet(credentials, sheet_id: str, sheet_name: str, csv_path: str
                     body={"values": chunk},
                 ).execute()
 
-        # Derniers tickets (première colonne = ID) pour affichage utilisateur
-        last_3_ids = []
-        if rows and len(rows) >= 1:
-            for row in rows[-3:]:
-                if row and len(row) > 0:
-                    last_3_ids.append(str(row[0]).strip())
         return {
             "success": True,
             "message": f"{len(rows)} lignes écrites dans '{sheet_name}'",
             "rows_written": len(rows),
-            "last_ticket_ids": last_3_ids,
+            "already_up_to_date": False,
+            "last_ticket_ids": _last_ticket_ids(rows),
         }
     except HttpError as e:
         logger.exception("Erreur API Google Sheets")
