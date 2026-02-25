@@ -13,7 +13,7 @@ from datetime import datetime, timedelta
 from typing import List, Dict, Optional
 from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Form
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response, FileResponse
 from pydantic import BaseModel
 from pathlib import Path
 
@@ -364,7 +364,7 @@ def sync_app_dashboard(request: Request):
         html += '<form method="post" action="/auth/disconnect" style="display:inline;"><button type="submit" class="btn btn-danger">Déconnexion</button></form></p>'
         html += '<h2>Enrichissement tickets_all.csv</h2>'
         html += '<p class="small">Récupère les tickets Zendesk mis à jour (selon la fréquence dans Paramètres) et les fusionne dans <code>exports/tickets_all.csv</code>. Fichier utilisé pour la sync vers la feuille et Looker Studio.</p>'
-        html += '<form method="post" action="/zendesk/sync/run-incremental" style="display:inline;"><button type="submit" class="btn btn-secondary">Enrichir maintenant</button></form>'
+        html += '<p><button type="button" id="btn-enrich" class="btn btn-secondary">Enrichir maintenant</button> <span id="enrich-result" class="small" style="margin-left:8px;"></span></p>'
         html += '<h2>Mise à jour manuelle – Google Sheet</h2>'
         if not sheet_id:
             html += '<div class="alert alert-info">Définissez l’ID de la feuille dans <a href="/zendesk/sync/settings">Paramètres</a>.</div>'
@@ -376,12 +376,35 @@ def sync_app_dashboard(request: Request):
                 <form method="post" action="/sync-now">
                     <p><button type="submit" class="btn btn-success">Mettre à jour la Google Sheet maintenant</button></p>
                 </form>
+                <p class="small" style="margin-top:12px;">Télécharger : """
+                for f in export_files[:10]:
+                    html += '<a href="/zendesk/exports/download/' + f["name"] + '" download>' + f["name"] + '</a> '
+                html += """</p>
                 """
             else:
                 html += '<div class="alert alert-info">Aucun fichier d’export trouvé dans <code>exports/</code>. Lancez d’abord un import complet depuis la page d’accueil.</div>'
 
     html += '<p><a href="/" class="btn btn-secondary">Retour à l’accueil</a></p>'
-    html += "</div></body></html>"
+    html += """<script>
+    (function(){
+        var btn = document.getElementById('btn-enrich');
+        if (!btn) return;
+        btn.onclick = function() {
+            var out = document.getElementById('enrich-result');
+            out.textContent = 'En cours...';
+            out.style.color = '';
+            btn.disabled = true;
+            fetch('/zendesk/sync/run-incremental', { method: 'POST', headers: { 'Accept': 'application/json' } })
+                .then(function(r) { return r.json(); })
+                .then(function(d) {
+                    if (d.ok) { out.textContent = (d.merged !== undefined ? d.merged + ' ticket(s) fusionnés.' : (d.message || 'OK')); out.style.color = 'green'; }
+                    else { out.textContent = 'Erreur : ' + (d.error || d.detail || 'inconnue'); out.style.color = '#c00'; }
+                    btn.disabled = false;
+                })
+                .catch(function(e) { out.textContent = 'Erreur : ' + e.message; out.style.color = '#c00'; btn.disabled = false; });
+        };
+    })();
+    </script></div></body></html>"""
     return HTMLResponse(html)
 
 
@@ -555,6 +578,18 @@ def sync_now():
 def _sync_frequency_hours(sync_frequency: str) -> int:
     """Retourne le nombre d'heures pour la fréquence (24h, 48h, weekly, monthly)."""
     return {"24h": 24, "48h": 48, "weekly": 24 * 7, "monthly": 24 * 30}.get(sync_frequency, 24)
+
+
+@app.get("/zendesk/exports/download/{filename}")
+def zendesk_export_download(filename: str):
+    """Télécharge un fichier du répertoire exports (ex. tickets_all.csv). Pas de path traversal."""
+    if "/" in filename or "\\" in filename or filename.startswith("."):
+        raise HTTPException(status_code=400, detail="Nom de fichier invalide")
+    base = Path(settings.EXPORT_OUTPUT_DIR).resolve()
+    path = (base / filename).resolve()
+    if not path.is_file() or not str(path).startswith(str(base)):
+        raise HTTPException(status_code=404, detail="Fichier introuvable")
+    return FileResponse(path, filename=path.name, media_type="text/csv")
 
 
 @app.get("/zendesk/sync/run-incremental")
@@ -770,12 +805,19 @@ def process_full_import():
 
         tickets = []
         count = 0
+        seen_ids = set()
         batch_size = 500
         filename = None
         first_batch = True
 
         try:
             for ticket in zendesk.get_all_tickets():
+                tid = ticket.get("ticket_id")
+                if tid is not None:
+                    try:
+                        seen_ids.add(int(tid))
+                    except (TypeError, ValueError):
+                        seen_ids.add(tid)
                 tickets.append(ticket)
                 count += 1
 
@@ -828,7 +870,42 @@ def process_full_import():
                 else:
                     filename = export_client.export(tickets)
                 logger.info(f"Fichier final: {filename}")
-        
+
+        # Combler les trous : récupérer par ID les tickets manquants dans la plage [1, max_id] (mode CSV uniquement)
+        gap_filled = 0
+        if settings.EXPORT_MODE == "csv" and seen_ids:
+            try:
+                max_id = max(int(x) for x in seen_ids)
+            except (ValueError, TypeError):
+                max_id = 0
+            if max_id > 0:
+                seen_ints = set()
+                for x in seen_ids:
+                    try:
+                        seen_ints.add(int(x))
+                    except (TypeError, ValueError):
+                        pass
+                missing = [i for i in range(1, max_id + 1) if i not in seen_ints][:2000]
+                if missing:
+                    _write_import_progress("running", count, f"{count} tickets – récupération de {len(missing)} ticket(s) manquant(s)...")
+                    export_client_csv = ExportClient(output_dir=settings.EXPORT_OUTPUT_DIR, file_format="csv")
+                    gap_tickets = []
+                    for i, tid in enumerate(missing):
+                        try:
+                            t = zendesk.get_ticket_by_id(tid)
+                            if t:
+                                gap_tickets.append(t)
+                                gap_filled += 1
+                            if (i + 1) % 100 == 0:
+                                _write_import_progress("running", count + len(gap_tickets), f"Trous : {len(gap_tickets)}/{len(missing)} récupérés...")
+                        except Exception as e:
+                            logger.warning("get_ticket_by_id %s: %s", tid, e)
+                        time.sleep(0.05)
+                    if gap_tickets:
+                        export_client_csv.merge_incremental_into_all(gap_tickets)
+                        logger.info("Gap fill : %s tickets manquants fusionnés dans tickets_all.csv", gap_filled)
+                    count += gap_filled
+
         logger.info(f"Import complet terminé: {count} tickets traités")
         try:
             status_data = zendesk._make_request("/tickets.json", params={"per_page": 1})
@@ -837,6 +914,8 @@ def process_full_import():
                 msg = f"Import terminé : {count} tickets (attendu {total_count}, {total_count - count} manquants)"
             else:
                 msg = f"Import terminé : {count} tickets exportés vers {filename or 'la feuille'}."
+            if gap_filled:
+                msg += f" ({gap_filled} trou(s) comblés par ID.)"
             _write_import_progress("done", count, msg)
         except Exception as e:
             logger.warning(f"Impossible de vérifier le count total: {e}")

@@ -234,7 +234,24 @@ class ZendeskClient:
             except requests.exceptions.HTTPError as e:
                 logger.error(f"Erreur lors de la récupération des tickets mis à jour: {e}")
                 raise
-    
+
+    def get_ticket_by_id(self, ticket_id: int, users_by_id: Optional[Dict] = None, groups_by_id: Optional[Dict] = None) -> Optional[Dict]:
+        """
+        Récupère un ticket par ID (pour combler les trous). Retourne le ticket normalisé ou None si 404/supprimé.
+        """
+        try:
+            data = self._make_request(f"/tickets/{ticket_id}.json", params={"include": "users,groups"})
+            ticket = data.get("ticket")
+            if not ticket:
+                return None
+            users = {u["id"]: u for u in data.get("users", [])}
+            groups = {g["id"]: g for g in data.get("groups", [])}
+            return self._normalize_ticket(ticket, users, groups)
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                return None
+            raise
+
     def _normalize_ticket(self, ticket: Dict, users_by_id: Optional[Dict] = None, groups_by_id: Optional[Dict] = None) -> Dict:
         """
         Normalise un ticket Zendesk en structure plate (avec noms assignee, requester, group si fournis).
