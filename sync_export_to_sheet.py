@@ -40,11 +40,11 @@ def sync_csv_to_sheet(credentials, sheet_id: str, sheet_name: str, csv_path: str
 
     csv_path = Path(csv_path)
     if not csv_path.exists():
-        return {"success": False, "message": f"Fichier introuvable: {csv_path}", "rows_written": 0}
+        return {"success": False, "message": f"Fichier introuvable: {csv_path}", "rows_written": 0, "last_ticket_ids": []}
 
     headers, rows = read_csv_rows(str(csv_path))
     if not headers:
-        return {"success": False, "message": "CSV vide ou sans en-têtes", "rows_written": 0}
+        return {"success": False, "message": "CSV vide ou sans en-têtes", "rows_written": 0, "last_ticket_ids": []}
 
     try:
         service = build("sheets", "v4", credentials=credentials)
@@ -145,10 +145,17 @@ def sync_csv_to_sheet(credentials, sheet_id: str, sheet_name: str, csv_path: str
                     body={"values": chunk},
                 ).execute()
 
+        # Derniers tickets (première colonne = ID) pour affichage utilisateur
+        last_3_ids = []
+        if rows and len(rows) >= 1:
+            for row in rows[-3:]:
+                if row and len(row) > 0:
+                    last_3_ids.append(str(row[0]).strip())
         return {
             "success": True,
             "message": f"{len(rows)} lignes écrites dans '{sheet_name}'",
             "rows_written": len(rows),
+            "last_ticket_ids": last_3_ids,
         }
     except HttpError as e:
         logger.exception("Erreur API Google Sheets")
@@ -156,6 +163,7 @@ def sync_csv_to_sheet(credentials, sheet_id: str, sheet_name: str, csv_path: str
             "success": False,
             "message": str(e.content.decode() if hasattr(e, "content") else str(e)),
             "rows_written": 0,
+            "last_ticket_ids": [],
         }
 
 

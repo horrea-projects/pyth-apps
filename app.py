@@ -6,10 +6,12 @@ Application FastAPI principale – plateforme de webapps (modules).
 - Module Calculs : opérations entre deux Google Sheets
 """
 
+import json
 import logging
 import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Optional
+from urllib.parse import quote
 from fastapi import FastAPI, HTTPException, BackgroundTasks, Request, Form
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from pydantic import BaseModel
@@ -249,6 +251,23 @@ def zendesk_dashboard(request: Request):
 
 # ---------- Zendesk : Sync vers Google Sheet ----------
 
+def _import_progress_path() -> Path:
+    """Fichier JSON de progression de l'import (data/import_progress.json)."""
+    return Path(settings.OAUTH_DATA_FILE).parent / "import_progress.json"
+
+
+def _write_import_progress(status: str, count: int = 0, message: str = "", error: str = ""):
+    """Écrit l'état de l'import pour affichage sur la page de progression."""
+    path = _import_progress_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = {"status": status, "count": count, "message": message, "error": error, "updated_at": time.time()}
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+    except Exception as e:
+        logger.warning("Impossible d'écrire import_progress: %s", e)
+
+
 def _list_export_files() -> list:
     """Liste les fichiers CSV : tickets_all.csv en premier (base pour sync Looker Studio), puis les autres par date."""
     export_dir = Path(settings.EXPORT_OUTPUT_DIR)
@@ -310,6 +329,7 @@ def sync_app_dashboard(request: Request):
 
     # Messages query params
     synced = request.query_params.get("synced")
+    last_ids = request.query_params.get("last", "")
     err = request.query_params.get("error")
     incremental_merged = request.query_params.get("incremental_merged")
     incremental_error = request.query_params.get("incremental_error")
@@ -317,7 +337,11 @@ def sync_app_dashboard(request: Request):
     html = _sync_app_base_html("Zendesk / Sync")
     html += '<div class="card"><h1>Sync vers Google Sheet</h1>'
     if synced:
-        html += f'<div class="alert alert-success">Feuille mise à jour : {synced} lignes envoyées.</div>'
+        msg = f"Feuille mise à jour : {synced} ligne(s) envoyées."
+        if last_ids:
+            ids_list = last_ids.replace("%2C", ",").split(",")[:3]
+            msg += " Derniers tickets intégrés : " + ", ".join(ids_list) + "."
+        html += f'<div class="alert alert-success">{msg}</div>'
     if err:
         html += f'<div class="alert alert-error">Erreur : {err}</div>'
     if incremental_merged is not None:
@@ -486,31 +510,46 @@ def sync_app_settings_save(
     return RedirectResponse("/zendesk/sync", status_code=302)
 
 
+@app.get("/sync-now")
+def sync_now_get():
+    """Si quelqu'un accède en GET (lien, favori), redirection avec message."""
+    return RedirectResponse("/zendesk/sync?error=" + quote("Utilisez le bouton « Mettre à jour la Google Sheet maintenant » sur cette page."), status_code=302)
+
+
 @app.post("/sync-now")
 def sync_now():
-    """Lance la synchronisation : dernier export CSV → Google Sheet."""
+    """Lance la synchronisation : tickets_all.csv (ou dernier CSV) → Google Sheet. Redirige toujours vers la page Sync (succès ou erreur)."""
     if not SYNC_APP_AVAILABLE:
-        raise HTTPException(status_code=503, detail="Module sync non disponible")
+        return RedirectResponse("/zendesk/sync?error=" + quote("Module sync non disponible"), status_code=302)
     if not is_google_connected(settings):
-        return RedirectResponse("/zendesk/sync")
+        return RedirectResponse("/zendesk/sync?error=" + quote("Compte Google non connecté"), status_code=302)
     creds = get_valid_credentials(settings)
     if not creds:
-        return RedirectResponse("/zendesk/sync?error=credentials")
+        return RedirectResponse("/zendesk/sync?error=" + quote("Credentials invalides ou expirés"), status_code=302)
     oauth_data = load_oauth_data(settings)
     sheet_id = oauth_data.get("sheet_id")
     sheet_name = oauth_data.get("sheet_name", "Tickets")
     if not sheet_id:
-        return RedirectResponse("/zendesk/sync?error=no_sheet_id")
+        return RedirectResponse("/zendesk/sync?error=" + quote("ID de feuille manquant. Renseignez les paramètres."), status_code=302)
 
     export_files = _list_export_files()
     if not export_files:
-        raise HTTPException(status_code=400, detail="Aucun fichier d'export trouvé. Lancez d'abord un import complet.")
+        return RedirectResponse("/zendesk/sync?error=" + quote("Aucun fichier d'export. Lancez d'abord un import complet."), status_code=302)
     csv_path = export_files[0]["path"]
 
-    result = sync_csv_to_sheet(creds, sheet_id, sheet_name, csv_path)
+    try:
+        result = sync_csv_to_sheet(creds, sheet_id, sheet_name, csv_path)
+    except Exception as e:
+        logger.exception("sync-now")
+        return RedirectResponse("/zendesk/sync?error=" + quote(str(e)[:200]), status_code=302)
+
     if result["success"]:
-        return RedirectResponse("/zendesk/sync?synced=" + str(result["rows_written"]))
-    raise HTTPException(status_code=500, detail=result.get("message", "Erreur inconnue"))
+        q = "synced=" + str(result["rows_written"])
+        last = result.get("last_ticket_ids") or []
+        if last:
+            q += "&last=" + quote(",".join(last))
+        return RedirectResponse("/zendesk/sync?" + q, status_code=302)
+    return RedirectResponse("/zendesk/sync?error=" + quote(result.get("message", "Erreur inconnue")[:200]), status_code=302)
 
 
 def _sync_frequency_hours(sync_frequency: str) -> int:
@@ -715,30 +754,34 @@ def get_status():
 
 
 def process_full_import():
-    """Fonction d'arrière-plan pour l'import complet."""
+    """Fonction d'arrière-plan pour l'import complet (met à jour data/import_progress.json)."""
     try:
+        _write_import_progress("running", 0, "Connexion à Zendesk...")
         logger.info(f"Démarrage de l'import complet (mode: {settings.EXPORT_MODE})")
         zendesk = get_zendesk_client()
         export_client = get_export_client()
-        
-        # Collecter les tickets par batches
+        _write_import_progress("running", 0, "Récupération des tickets...")
+
         tickets = []
         count = 0
-        batch_size = 500  # Taille des batches pour CSV/Excel
+        batch_size = 500
         filename = None
         first_batch = True
-        
+
         try:
             for ticket in zendesk.get_all_tickets():
                 tickets.append(ticket)
                 count += 1
-                
+
+                if count % 500 == 0:
+                    _write_import_progress("running", count, f"{count} tickets récupérés...")
+
                 # Pour Google Sheets, écrire par batch de 100
                 if settings.EXPORT_MODE == "gsheet" and len(tickets) >= 100:
                     export_client.write_tickets(tickets, append=True)
                     tickets = []
                     logger.info(f"Progression: {count} tickets traités")
-                # Pour CSV/Excel, exporter par batches pour éviter les problèmes de mémoire
+                # Pour CSV/Excel, exporter par batches
                 elif settings.EXPORT_MODE in ["csv", "xlsx"] and len(tickets) >= batch_size:
                     if first_batch:
                         # Premier batch : créer le fichier avec en-têtes
@@ -755,15 +798,14 @@ def process_full_import():
                             filename = export_client.export(tickets)
                             logger.info(f"Nouveau fichier créé: {filename}")
                     tickets = []
+                    _write_import_progress("running", count, f"{count} tickets – export en cours...")
                     logger.info(f"Progression: {count} tickets traités")
         except Exception as e:
             logger.error(f"Erreur lors de la récupération des tickets: {e}")
-            logger.error(f"Tickets récupérés jusqu'à présent: {count}")
             import traceback
             logger.error(traceback.format_exc())
-            # Continuer pour exporter ce qui a été récupéré
-            pass
-        
+            _write_import_progress("running", count, f"Erreur récupération, export de {count} tickets...")
+
         # Écrire/Exporter les tickets restants
         if tickets:
             if settings.EXPORT_MODE == "gsheet":
@@ -782,24 +824,21 @@ def process_full_import():
                 logger.info(f"Fichier final: {filename}")
         
         logger.info(f"Import complet terminé: {count} tickets traités")
-        if filename:
-            logger.info(f"Fichier final: {filename}")
-        
-        # Vérifier le count total depuis Zendesk pour comparaison
         try:
             status_data = zendesk._make_request("/tickets.json", params={"per_page": 1})
             total_count = status_data.get("count", 0)
             if count < total_count:
-                logger.warning(f"⚠️  ATTENTION: {total_count - count} tickets manquants !")
-                logger.warning(f"   Tickets récupérés: {count}")
-                logger.warning(f"   Tickets attendus selon Zendesk: {total_count}")
+                msg = f"Import terminé : {count} tickets (attendu {total_count}, {total_count - count} manquants)"
             else:
-                logger.info(f"✅ Tous les tickets ont été récupérés ({count}/{total_count})")
+                msg = f"Import terminé : {count} tickets exportés vers {filename or 'la feuille'}."
+            _write_import_progress("done", count, msg)
         except Exception as e:
             logger.warning(f"Impossible de vérifier le count total: {e}")
-        
+            _write_import_progress("done", count, f"Import terminé : {count} tickets exportés.")
+
     except Exception as e:
         logger.error(f"Erreur lors de l'import complet: {e}")
+        _write_import_progress("error", 0, "", error=str(e)[:500])
         raise
 
 
@@ -840,7 +879,62 @@ async def import_full(request: Request, background_tasks: BackgroundTasks):
     accept = (request.headers.get("Accept") or "").lower()
     if "application/json" in accept:
         return ImportResponse(success=True, message=message)
-    return RedirectResponse("/zendesk?started=full", status_code=302)
+    return RedirectResponse("/zendesk/import-progress", status_code=302)
+
+
+@app.get("/import/status")
+def import_status():
+    """État de l'import en cours ou dernier import (pour la page de progression)."""
+    path = _import_progress_path()
+    if not path.exists():
+        return JSONResponse({"status": "idle", "count": 0, "message": "", "error": ""})
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return JSONResponse(data)
+    except Exception:
+        return JSONResponse({"status": "idle", "count": 0, "message": "", "error": ""})
+
+
+@app.get("/zendesk/import-progress", response_class=HTMLResponse)
+def zendesk_import_progress():
+    """Page qui affiche la progression de l'import en temps réel (polling)."""
+    base = pythapps_base_html("Import en cours", breadcrumb_fragment("Zendesk / Import"))
+    base += """
+    <div class="card">
+        <h1>Import complet Zendesk</h1>
+        <p id="progress-msg">Chargement...</p>
+        <p id="progress-count" class="small" style="margin-top:8px;"></p>
+        <p id="progress-done" style="margin-top:16px;display:none;">
+            <a href="/zendesk" class="btn btn-primary">Retour au module Zendesk</a>
+        </p>
+    </div>
+    <script>
+    var done = false;
+    function poll() {
+        if (done) return;
+        fetch('/import/status')
+            .then(function(r) { return r.json(); })
+            .then(function(d) {
+                document.getElementById('progress-msg').textContent = d.message || d.status || '';
+                document.getElementById('progress-count').textContent = d.count ? d.count + ' ticket(s)' : '';
+                if (d.status === 'done') {
+                    document.getElementById('progress-msg').textContent = d.message || 'Import terminé.';
+                    document.getElementById('progress-done').style.display = 'block';
+                    done = true;
+                } else if (d.status === 'error') {
+                    document.getElementById('progress-msg').textContent = 'Erreur : ' + (d.error || '');
+                    document.getElementById('progress-done').style.display = 'block';
+                    done = true;
+                }
+            })
+            .catch(function() { document.getElementById('progress-msg').textContent = 'Impossible de charger la progression.'; });
+    }
+    poll();
+    setInterval(poll, 2000);
+    </script>
+    </body></html>"""
+    return HTMLResponse(base)
 
 
 @app.post("/import/incremental", response_model=ImportResponse)
