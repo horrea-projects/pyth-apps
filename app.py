@@ -270,20 +270,25 @@ def zendesk_dashboard(request: Request):
 
     all_files = _list_all_export_files()
 
-    # Échapper les noms de fichiers pour l'URL (éviter caractères spéciaux dans le HTML)
+    # Échapper les noms de fichiers pour l'URL
     def _escape_url(s: str) -> str:
         return quote(s, safe="")
 
     extra = f"""
-    <div class="info"><strong>Mode d'export :</strong> {settings.EXPORT_MODE.upper()}</div>
-    <h2>Statut & derniers runs</h2>
+    <p class="small" style="color:#666; margin-bottom:20px;">Export Zendesk vers CSV et base unique <code>tickets_all.csv</code> pour Looker Studio ou Google Sheet. Aucune connexion Google requise pour l’export.</p>
+    <h2>Statut</h2>
     <table style="max-width:520px; border-collapse:collapse; font-size:14px;"><tbody>
-        <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Fichier tickets_all.csv</td><td style="padding:6px 0;">Dernière mise à jour : {_format_ts(tickets_all_updated)}</td></tr>
-        <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Google Sheet</td><td style="padding:6px 0;">Dernière sync : {_format_ts(last_sync_at)}</td></tr>
         <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Zendesk</td><td style="padding:6px 0;">{zendesk_status}</td></tr>
-        <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Google (OAuth / feuille)</td><td style="padding:6px 0;">{google_status}</td></tr>
+        <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Base tickets_all.csv</td><td style="padding:6px 0;">Dernière mise à jour : {_format_ts(tickets_all_updated)}</td></tr>
+        <tr><td style="padding:6px 12px 6px 0; vertical-align:top;">Google Sheet (optionnel)</td><td style="padding:6px 0;">{google_status} · Dernière sync : {_format_ts(last_sync_at)}</td></tr>
     </tbody></table>
-    <h2>Fichiers d'export</h2>
+    <h2>Export complet (tous les tickets)</h2>
+    <p class="small">Récupère tous les tickets Zendesk, crée un fichier horodaté et met à jour <code>tickets_all.csv</code>. À lancer après une première installation ou pour repartir d’une base à jour.</p>
+    <form method="post" action="/import/full" style="display:inline;" onsubmit="return confirm('Lancer l’import complet ? Cela peut prendre plusieurs minutes.');">
+        <button type="submit" class="btn btn-green">Import complet (tous les tickets)</button>
+    </form>
+    <p class="small" style="margin-top:8px;"><a href="/zendesk/import-progress">Voir la progression de l’import</a></p>
+    <h2>Fichiers d’export</h2>
     """
     if all_files:
         extra += "<p style=\"font-size:14px;\">Télécharger : "
@@ -294,10 +299,10 @@ def zendesk_dashboard(request: Request):
             extra += f'<span style="color:#666;">({_format_ts(f["modified"])})</span> '
         extra += "</p>"
     else:
-        extra += '<p style="font-size:14px; color:#666;">Aucun fichier dans <code>exports/</code>.</p>'
+        extra += '<p style="font-size:14px; color:#666;">Aucun fichier dans <code>exports/</code>. Lancez un import complet ci-dessus.</p>'
     extra += """
-    <p style="margin-top:20px;"><a href="/zendesk/sync" class="btn btn-blue">Sync vers Google Sheet</a></p>
-    <p style="margin-top:24px;"><a href="/" class="btn btn-secondary">Accueil</a></p>
+    <p style="margin-top:24px;"><a href="/zendesk/sync" class="btn btn-blue">Export incrémental & Sync Google Sheet</a></p>
+    <p style="margin-top:12px;"><a href="/" class="btn btn-secondary">Accueil</a></p>
     """
     return HTMLResponse(_zendesk_page_html(extra))
 
@@ -401,8 +406,9 @@ def sync_app_dashboard(request: Request):
     incremental_merged = request.query_params.get("incremental_merged")
     incremental_error = request.query_params.get("incremental_error")
 
-    html = _sync_app_base_html("Zendesk / Sync")
-    html += '<div class="card"><h1>Sync vers Google Sheet</h1>'
+    html = _sync_app_base_html("Zendesk / Export & Sync")
+    html += '<div class="card"><h1>Zendesk – Export & Sync</h1>'
+    html += '<p class="small" style="color:#666; margin-bottom:16px;">Mettez à jour la base <code>tickets_all.csv</code> (sans Google), puis optionnellement envoyez-la vers une Google Sheet.</p>'
     if already_updated:
         msg = "Déjà à jour avec les derniers tickets intégrés."
         if last_ids:
@@ -422,42 +428,49 @@ def sync_app_dashboard(request: Request):
     if incremental_error:
         html += f'<div class="alert alert-error">Enrichissement : {incremental_error}</div>'
 
+    # Connexion Google (optionnelle)
+    html += '<h2>Connexion Google (optionnelle)</h2>'
     if not connected:
         redirect_uri = str(request.base_url).rstrip("/") + "/auth/google/callback"
         auth_url = get_auth_url(settings, redirect_uri, state="/zendesk/sync")
-        html += """
-        <div class="alert alert-info">
-            Connectez-vous avec votre compte Google pour envoyer les exports Zendesk vers une feuille Google Sheet.
-        </div>
-        <p><a href=\"""" + auth_url + """\" class="btn btn-primary">Se connecter avec Google</a></p>
-        """
+        html += '<p class="small">Connectez-vous uniquement si vous souhaitez envoyer les données vers une Google Sheet.</p>'
+        html += '<p><a href="' + auth_url + '" class="btn btn-primary">Se connecter avec Google</a></p>'
     else:
-        html += '<div class="alert alert-success">Compte Google connecté.</div>'
-        html += '<p><a href="/zendesk/sync/settings" class="btn btn-secondary">Paramètres (feuille, fréquence, mise à jour auto)</a> '
+        html += '<p class="alert alert-success" style="margin-bottom:8px;">Compte Google connecté.</p>'
+        html += '<p><a href="/zendesk/sync/settings" class="btn btn-secondary">Paramètres (feuille, fréquence)</a> '
         html += '<form method="post" action="/auth/disconnect" style="display:inline;"><button type="submit" class="btn btn-danger">Déconnexion</button></form></p>'
-        html += '<h2>Enrichissement tickets_all.csv</h2>'
-        html += '<p class="small">Récupère les tickets Zendesk mis à jour (selon la fréquence dans Paramètres) et les fusionne dans <code>exports/tickets_all.csv</code>. Fichier utilisé pour la sync vers la feuille et Looker Studio.</p>'
-        html += '<p><button type="button" id="btn-enrich" class="btn btn-secondary">Enrichir maintenant</button> <span id="enrich-result" class="small" style="margin-left:8px;"></span></p>'
-        html += '<h2>Mise à jour manuelle – Google Sheet</h2>'
-        if not sheet_id:
-            html += '<div class="alert alert-info">Définissez l’ID de la feuille dans <a href="/zendesk/sync/settings">Paramètres</a>.</div>'
-        else:
-            if export_files:
-                latest = export_files[0]
-                html += f'<p class="small">Base pour la sync : <strong>{latest["name"]}</strong></p>'
-                html += """
-                <form method="post" action="/sync-now">
-                    <p><button type="submit" class="btn btn-success">Mettre à jour la Google Sheet maintenant</button></p>
-                </form>
-                <p class="small" style="margin-top:12px;">Télécharger : """
-                for f in _list_all_export_files():
-                    html += '<a href="/zendesk/exports/download/' + f["name"] + '" download>' + f["name"] + '</a> '
-                html += """</p>
-                """
-            else:
-                html += '<div class="alert alert-info">Aucun fichier d’export trouvé dans <code>exports/</code>. Lancez d’abord un import complet depuis la page d’accueil.</div>'
 
-    html += '<p><a href="/" class="btn btn-secondary">Retour à l’accueil</a></p>'
+    # Base tickets_all.csv – toujours visible (pas besoin de Google)
+    html += '<h2>Mise à jour de la base tickets_all.csv</h2>'
+    html += '<p class="small">Récupère les tickets Zendesk modifiés récemment (selon la fréquence dans Paramètres) et les fusionne dans <code>tickets_all.csv</code>. À faire régulièrement après un import complet.</p>'
+    html += '<p><button type="button" id="btn-enrich" class="btn btn-secondary">Enrichir maintenant</button> <span id="enrich-result" class="small" style="margin-left:8px;"></span></p>'
+
+    # Fichiers à télécharger – toujours visible
+    html += '<h2>Fichiers d’export</h2>'
+    all_export_files = _list_all_export_files()
+    if all_export_files:
+        html += '<p class="small">Télécharger : '
+        for f in all_export_files:
+            safe_name = quote(f["name"], safe="")
+            html += f'<a href="/zendesk/exports/download/{safe_name}" download>{html.escape(f["name"])}</a> '
+        html += '</p>'
+    else:
+        html += '<p class="small" style="color:#666;">Aucun fichier. Lancez un <a href="/zendesk">import complet</a> d’abord.</p>'
+
+    # Sync Google Sheet – seulement si connecté
+    html += '<h2>Envoyer vers Google Sheet</h2>'
+    if not connected:
+        html += '<p class="small" style="color:#666;">Connectez-vous avec Google ci-dessus pour activer l’envoi vers une feuille.</p>'
+    elif not sheet_id:
+        html += '<p class="small">Définissez l’ID de la feuille dans <a href="/zendesk/sync/settings">Paramètres</a>.</p>'
+    elif export_files:
+        latest = export_files[0]
+        html += f'<p class="small">Base utilisée : <strong>{html.escape(latest["name"])}</strong></p>'
+        html += '<form method="post" action="/sync-now"><button type="submit" class="btn btn-success">Mettre à jour la Google Sheet maintenant</button></form>'
+    else:
+        html += '<p class="small" style="color:#666;">Aucun fichier d’export. Lancez un <a href="/zendesk">import complet</a> puis « Enrichir maintenant ».</p>'
+
+    html += '<p style="margin-top:24px;"><a href="/zendesk" class="btn btn-secondary">Retour au module Zendesk</a> <a href="/" class="btn btn-secondary">Accueil</a></p>'
     html += """<script>
     (function(){
         var btn = document.getElementById('btn-enrich');
@@ -925,24 +938,25 @@ def process_full_import():
                     export_client.write_tickets(tickets, append=True)
                     tickets = []
                     logger.info(f"Progression: {count} tickets traités")
-                # Pour CSV/Excel, exporter par batches
+                # Pour CSV/Excel, exporter par batches + mettre à jour tickets_all.csv (CSV uniquement)
                 elif settings.EXPORT_MODE in ["csv", "xlsx"] and len(tickets) >= batch_size:
                     if first_batch:
-                        # Premier batch : créer le fichier avec en-têtes
+                        # Premier batch : créer le fichier horodaté avec en-têtes
                         filename = export_client.export(tickets)
+                        if settings.EXPORT_MODE == "csv":
+                            export_client.merge_incremental_into_all(tickets)
                         first_batch = False
                         logger.info(f"Fichier créé: {filename}")
                     else:
-                        # Batches suivants : ajouter au fichier existant (CSV uniquement)
+                        # Batches suivants : ajouter au fichier existant (CSV) et fusionner dans tickets_all
                         if settings.EXPORT_MODE == "csv":
-                            # Pour CSV, on peut ajouter les lignes
                             export_client.export_to_csv(tickets, filename=filename, append=True)
+                            export_client.merge_incremental_into_all(tickets)
                         else:
-                            # Pour Excel, créer un nouveau fichier avec timestamp
                             filename = export_client.export(tickets)
                             logger.info(f"Nouveau fichier créé: {filename}")
                     tickets = []
-                    _write_import_progress("running", count, f"{count} tickets – export en cours...")
+                    _write_import_progress("running", count, f"{count} tickets – export et base mis à jour...")
                     logger.info(f"Progression: {count} tickets traités")
         except Exception as e:
             logger.error(f"Erreur lors de la récupération des tickets: {e}")
@@ -956,9 +970,10 @@ def process_full_import():
                 export_client.write_tickets(tickets, append=True)
             elif settings.EXPORT_MODE == "csv":
                 if first_batch:
-                    export_client.export_to_csv(tickets, filename=filename)
+                    filename = export_client.export_to_csv(tickets)
                 else:
                     export_client.export_to_csv(tickets, filename=filename, append=True)
+                export_client.merge_incremental_into_all(tickets)
                 logger.info(f"Fichier final: {filename}")
             else:
                 if first_batch:
