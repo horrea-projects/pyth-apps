@@ -7,6 +7,7 @@ Application FastAPI principale – plateforme de webapps (modules).
 """
 
 import html
+from html import escape as html_escape
 import json
 import logging
 import time
@@ -455,7 +456,7 @@ def sync_app_dashboard(request: Request):
         html += '<p class="small">Télécharger : '
         for f in all_export_files:
             safe_name = quote(f["name"], safe="")
-            html += f'<a href="/zendesk/exports/download/{safe_name}" download>{html.escape(f["name"])}</a> '
+            html += f'<a href="/zendesk/exports/download/{safe_name}" download>{html_escape(f["name"])}</a> '
         html += '</p>'
     else:
         html += '<p class="small" style="color:#666;">Aucun fichier. Lancez un <a href="/zendesk">import complet</a> d’abord.</p>'
@@ -466,10 +467,19 @@ def sync_app_dashboard(request: Request):
         html += '<p class="small" style="color:#666;">Connectez-vous avec Google ci-dessus pour activer l’envoi vers une feuille.</p>'
     elif not sheet_id:
         html += '<p class="small">Définissez l’ID de la feuille dans <a href="/zendesk/sync/settings">Paramètres</a>.</p>'
-    elif export_files:
-        latest = export_files[0]
-        html += f'<p class="small">Base utilisée : <strong>{html.escape(latest["name"])}</strong></p>'
-        html += '<form method="post" action="/sync-now"><button type="submit" class="btn btn-success">Mettre à jour la Google Sheet maintenant</button></form>'
+    elif all_export_files:
+        names = [f["name"] for f in all_export_files]
+        default_name = "tickets_all.csv" if "tickets_all.csv" in names else names[0]
+        html += '<form method="post" action="/sync-now">'
+        html += '<p class="small"><label for="sync_file">Fichier à envoyer vers la feuille :</label></p>'
+        html += '<p><select name="sync_file" id="sync_file" style="max-width:100%; min-width:280px;">'
+        for f in all_export_files:
+            name = f["name"]
+            selected = ' selected="selected"' if name == default_name else ""
+            html += f'<option value="{html_escape(name)}"{selected}>{html_escape(name)}</option>'
+        html += '</select></p>'
+        html += '<p><button type="submit" class="btn btn-success">Mettre à jour la Google Sheet maintenant</button></p>'
+        html += '</form>'
     else:
         html += '<p class="small" style="color:#666;">Aucun fichier d’export. Lancez un <a href="/zendesk">import complet</a> puis « Enrichir maintenant ».</p>'
 
@@ -633,8 +643,8 @@ def sync_now_get():
 
 
 @app.post("/sync-now")
-def sync_now():
-    """Lance la synchronisation : tickets_all.csv (ou dernier CSV) → Google Sheet. Redirige toujours vers la page Sync (succès ou erreur)."""
+def sync_now(sync_file: Optional[str] = Form(None)):
+    """Lance la synchronisation : fichier choisi (ou premier export) → Google Sheet. Redirige vers la page Sync."""
     if not SYNC_APP_AVAILABLE:
         return RedirectResponse("/zendesk/sync?error=" + quote("Module sync non disponible"), status_code=302)
     if not is_google_connected(settings):
@@ -648,10 +658,20 @@ def sync_now():
     if not sheet_id:
         return RedirectResponse("/zendesk/sync?error=" + quote("ID de feuille manquant. Renseignez les paramètres."), status_code=302)
 
-    export_files = _list_export_files()
-    if not export_files:
-        return RedirectResponse("/zendesk/sync?error=" + quote("Aucun fichier d'export. Lancez d'abord un import complet."), status_code=302)
-    csv_path = export_files[0]["path"]
+    export_dir = Path(settings.EXPORT_OUTPUT_DIR).resolve()
+    csv_path = None
+    if sync_file and sync_file.strip():
+        # Fichier choisi par l'utilisateur (nom uniquement, pas de path traversal)
+        name = sync_file.strip()
+        if "/" not in name and "\\" not in name and not name.startswith("."):
+            candidate = (export_dir / name).resolve()
+            if candidate.is_file() and str(candidate).startswith(str(export_dir)):
+                csv_path = str(candidate)
+    if not csv_path:
+        export_files = _list_export_files()
+        if not export_files:
+            return RedirectResponse("/zendesk/sync?error=" + quote("Aucun fichier d'export. Lancez d'abord un import complet."), status_code=302)
+        csv_path = export_files[0]["path"]
 
     try:
         result = sync_csv_to_sheet(creds, sheet_id, sheet_name, csv_path)
