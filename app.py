@@ -572,7 +572,7 @@ def sync_app_settings_page():
             <p class="small">Fréquence des mises à jour incrémentales Zendesk (fusion dans tickets_all.csv).</p>
             <select name="sync_frequency" style="padding:8px;min-width:200px;">""" + freq_select + """</select>
             <label style="margin-top:12px;"><input type="checkbox" name="auto_update" """ + ("checked" if auto_update else "") + """> Mise à jour automatique (planifiée)</label>
-            <p class="small">Si activé, configurez une tâche cron pour appeler POST /sync-now régulièrement.</p>
+            <p class="small">Si activé, configurez une tâche cron pour appeler POST /sync-now régulièrement (enrichissement Zendesk puis mise à jour de la feuille).</p>
             <p style="margin-top:16px;"><button type="submit" class="btn btn-primary">Enregistrer</button></p>
         </form>
         <p><a href="/zendesk/sync" class="btn btn-secondary">Retour au dashboard</a></p>
@@ -644,7 +644,7 @@ def sync_now_get():
 
 @app.post("/sync-now")
 def sync_now(sync_file: Optional[str] = Form(None)):
-    """Lance la synchronisation : fichier choisi (ou premier export) → Google Sheet. Redirige vers la page Sync."""
+    """Enrichit tickets_all.csv puis envoie le CSV choisi vers Google Sheet."""
     if not SYNC_APP_AVAILABLE:
         return RedirectResponse("/zendesk/sync?error=" + quote("Module sync non disponible"), status_code=302)
     if not is_google_connected(settings):
@@ -658,6 +658,20 @@ def sync_now(sync_file: Optional[str] = Form(None)):
     if not sheet_id:
         return RedirectResponse("/zendesk/sync?error=" + quote("ID de feuille manquant. Renseignez les paramètres."), status_code=302)
 
+    incremental_out = None
+    try:
+        # Assure que la feuille reçoit les tickets les plus récents.
+        incremental_out = _run_incremental_json("application/json")
+    except Exception as e:
+        logger.exception("sync-now incremental")
+        return RedirectResponse("/zendesk/sync?error=" + quote(("Enrichissement Zendesk échoué: " + str(e))[:200]), status_code=302)
+    if not incremental_out.get("ok"):
+        return RedirectResponse(
+            "/zendesk/sync?error="
+            + quote(("Enrichissement Zendesk échoué: " + incremental_out.get("error", "Erreur inconnue"))[:200]),
+            status_code=302,
+        )
+
     export_dir = Path(settings.EXPORT_OUTPUT_DIR).resolve()
     csv_path = None
     if sync_file and sync_file.strip():
@@ -670,7 +684,7 @@ def sync_now(sync_file: Optional[str] = Form(None)):
     if not csv_path:
         export_files = _list_export_files()
         if not export_files:
-            return RedirectResponse("/zendesk/sync?error=" + quote("Aucun fichier d'export. Lancez d'abord un import complet."), status_code=302)
+            return RedirectResponse("/zendesk/sync?error=" + quote("Aucun fichier d'export après enrichissement."), status_code=302)
         csv_path = export_files[0]["path"]
 
     try:
@@ -693,6 +707,8 @@ def sync_now(sync_file: Optional[str] = Form(None)):
                 q += "&last=" + quote(",".join(last))
             return RedirectResponse("/zendesk/sync?" + q, status_code=302)
         q = "synced=" + str(result["rows_written"])
+        if incremental_out is not None:
+            q += "&incremental_merged=" + str(incremental_out.get("merged", 0))
         last = result.get("last_ticket_ids") or []
         if last:
             q += "&last=" + quote(",".join(last))

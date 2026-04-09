@@ -82,6 +82,7 @@ Aucun fichier `credentials.json` (Service Account) n’est nécessaire.
   `curl -X POST "https://VOTRE_USER.pythonanywhere.com/zendesk/sync/run-incremental?secret=VOTRE_SECRET" -H "Accept: application/json"`
 - **Sync vers la feuille** :  
   `POST /sync-now`  
+  Cet endpoint lance d'abord l'enrichissement incrémental Zendesk (fusion dans `tickets_all.csv`), puis envoie le CSV vers Google Sheet.  
   Exemple : `curl -X POST https://VOTRE_USER.pythonanywhere.com/sync-now`
 
 ---
