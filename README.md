@@ -54,7 +54,7 @@ Zendesk Connector/
 ### 1. Cloner ou télécharger le projet
 
 ```bash
-cd "Zendesk Connector"
+git clone ...
 ```
 
 ### 2. Créer un environnement virtuel
